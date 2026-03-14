@@ -131,12 +131,12 @@ def main() -> int:
                     max_cycles = None
 
             min_profit_points_raw = os.getenv("POSITION_MONITOR_MIN_PROFIT_POINTS", "").strip()
-            min_profit_points = 0.0
+            min_profit_points = 50.0
             if min_profit_points_raw:
                 try:
                     min_profit_points = float(min_profit_points_raw)
                 except ValueError:
-                    min_profit_points = 0.0
+                    min_profit_points = 50.0
 
             execution_enabled = os.getenv("ENABLE_POSITION_CLOSE_EXECUTION") == "1"
 
@@ -156,6 +156,10 @@ def main() -> int:
                 max_bars_fetch=runtime.app_settings.max_bars_fetch,
             )
             feature_engine = FeatureEngine()
+
+            def append_monitor_log(payload: dict[str, Any]) -> None:
+                with monitor_log_path.open("a", encoding="utf-8") as file:
+                    file.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
             def eval_exit_action(snapshot: Any, side: str, profit_points: float) -> tuple[str, str]:
                 close = float(getattr(snapshot, "close", 0.0) or 0.0)
@@ -232,6 +236,23 @@ def main() -> int:
                 except Exception as exc:
                     return (False, str(exc))
 
+            monitor_symbols: list[str] = []
+            for symbol in runtime.app_settings.symbols:
+                try:
+                    gateway.ensure_symbol_selected(symbol)
+                    monitor_symbols.append(symbol)
+                except Exception:
+                    if symbol not in reported_position_failures:
+                        reported_position_failures.add(symbol)
+                        print(
+                            f"[MONITOR] {symbol} side=NA action=HOLD ticket=NA "
+                            f"reason=symbol_unavailable"
+                        )
+
+            if not monitor_symbols:
+                print("[MONITOR-SUMMARY] positions=0")
+                return 0
+
             cycle = 0
             try:
                 while True:
@@ -240,7 +261,7 @@ def main() -> int:
                     close_signals = 0
                     executed = 0
 
-                    for symbol in runtime.app_settings.symbols:
+                    for symbol in monitor_symbols:
                         try:
                             positions = gateway.get_positions_by_symbol(symbol)
                         except Exception as exc:
@@ -274,10 +295,30 @@ def main() -> int:
                             except Exception as exc:
                                 if pos_symbol not in reported_market_failures:
                                     reported_market_failures.add(pos_symbol)
-                                    print(
-                                        f"[MONITOR] {pos_symbol} side={side} action=HOLD ticket={ticket} "
-                                        f"reason=tick_unavailable"
-                                    )
+                                action = "HOLD"
+                                reason = "tick_unavailable"
+                                print(
+                                    f"[MONITOR] {pos_symbol} side={side} action={action} ticket={ticket} "
+                                    f"reason={reason}"
+                                )
+                                append_monitor_log(
+                                    {
+                                        "timestamp": datetime.utcnow().isoformat(),
+                                        "symbol": pos_symbol,
+                                        "ticket": ticket,
+                                        "side": side,
+                                        "action": action,
+                                        "reason": reason,
+                                        "price_open": price_open,
+                                        "current_price": None,
+                                        "sl": sl,
+                                        "tp": tp,
+                                        "volume": volume,
+                                        "execution_enabled": execution_enabled,
+                                        "execution_attempted": False,
+                                        "execution_success": False,
+                                    }
+                                )
                                 continue
 
                             contract = runtime.symbol_registry.symbols.get(pos_symbol) or runtime.symbol_registry.symbols.get(symbol)
@@ -300,10 +341,30 @@ def main() -> int:
                             except Exception as exc:
                                 if pos_symbol not in reported_market_failures:
                                     reported_market_failures.add(pos_symbol)
-                                    print(
-                                        f"[MONITOR] {pos_symbol} side={side} action=HOLD ticket={ticket} "
-                                        f"reason=snapshot_unavailable"
-                                    )
+                                action = "HOLD"
+                                reason = "snapshot_unavailable"
+                                print(
+                                    f"[MONITOR] {pos_symbol} side={side} action={action} ticket={ticket} "
+                                    f"reason={reason}"
+                                )
+                                append_monitor_log(
+                                    {
+                                        "timestamp": datetime.utcnow().isoformat(),
+                                        "symbol": pos_symbol,
+                                        "ticket": ticket,
+                                        "side": side,
+                                        "action": action,
+                                        "reason": reason,
+                                        "price_open": price_open,
+                                        "current_price": current_price,
+                                        "sl": sl,
+                                        "tp": tp,
+                                        "volume": volume,
+                                        "execution_enabled": execution_enabled,
+                                        "execution_attempted": False,
+                                        "execution_success": False,
+                                    }
+                                )
                                 continue
 
                             action, reason = eval_exit_action(snapshot, side, profit_points)
@@ -335,29 +396,24 @@ def main() -> int:
                                         executed += 1
                                         execution_success = True
 
-                            with monitor_log_path.open("a", encoding="utf-8") as file:
-                                file.write(
-                                    json.dumps(
-                                        {
-                                            "timestamp": datetime.utcnow().isoformat(),
-                                            "symbol": pos_symbol,
-                                            "ticket": ticket,
-                                            "side": side,
-                                            "action": action,
-                                            "reason": reason,
-                                            "price_open": price_open,
-                                            "current_price": current_price,
-                                            "sl": sl,
-                                            "tp": tp,
-                                            "volume": volume,
-                                            "execution_enabled": execution_enabled,
-                                            "execution_attempted": execution_attempted,
-                                            "execution_success": execution_success,
-                                        },
-                                        ensure_ascii=False,
-                                    )
-                                    + "\n"
-                                )
+                            append_monitor_log(
+                                {
+                                    "timestamp": datetime.utcnow().isoformat(),
+                                    "symbol": pos_symbol,
+                                    "ticket": ticket,
+                                    "side": side,
+                                    "action": action,
+                                    "reason": reason,
+                                    "price_open": price_open,
+                                    "current_price": current_price,
+                                    "sl": sl,
+                                    "tp": tp,
+                                    "volume": volume,
+                                    "execution_enabled": execution_enabled,
+                                    "execution_attempted": execution_attempted,
+                                    "execution_success": execution_success,
+                                }
+                            )
 
                     print(
                         f"[MONITOR-CYCLE] {cycle} positions={positions_count} "
