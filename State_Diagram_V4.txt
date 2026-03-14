@@ -1,0 +1,406 @@
+Bot_v2_Groq_AI_Analysze_Decision
+State Diagram
+Version: v2.0.0
+
+======================================================================
+CURRENT VERIFIED SYSTEM STATE
+======================================================================
+
+[STATE 0] REPOSITORY FOUNDATION
+----------------------------------------------------------------------
+Status: DONE
+
+Evidence:
+- app/main.py loads config
+- validates runtime settings
+- initializes storage
+- prints runtime summary
+- completes foundation bootstrap safely
+
+Outputs:
+- app_name
+- environment
+- symbols
+- timeframe
+- ai_model
+- risk_per_trade_pct
+- minimum_rr
+- registered_symbol_contracts
+
+Transition:
+FOUNDATION_READY -> CANDIDATE_BOUNDARY_AVAILABLE
+
+======================================================================
+[STATE 1] CANDIDATE DETECTION / NORMALIZATION BOUNDARY
+----------------------------------------------------------------------
+Status: DONE
+
+Modules:
+- core/candidate_engine.py
+- core/decision_validator.py
+- core/candidate_pipeline_postprocessor.py
+- core/candidate_scan_finalize.py
+- core/runtime_candidate_reporter.py
+- core/symbol_registry.py
+
+Verified behavior:
+- candidate rows can be processed
+- symbol aliases can be normalized
+- duplicate setups can be rejected
+- accepted/rejected rows can be emitted
+- summary and log lines can be emitted
+
+Expected finalized output keys:
+- accepted
+- rejected
+- all_items
+- log_lines
+- summary
+
+Transition:
+CANDIDATE_BOUNDARY_AVAILABLE -> GROQ_ADAPTER_AVAILABLE
+
+======================================================================
+[STATE 2] GROQ ADAPTER LAYER
+----------------------------------------------------------------------
+Status: DONE
+
+Modules:
+- core/groq_prompt_builder.py
+- core/groq_client.py
+- core/groq_response_parser.py
+
+Verified behavior:
+- build prompt from candidate-style inputs
+- call Groq via API client
+- return client metadata:
+  success / content / model_name / latency_ms / error
+- parse model output into AIDecision
+- deny safely on malformed output
+- validate stop-loss logic
+- reject on low confidence
+- preserve schema validity
+
+Transition:
+GROQ_ADAPTER_AVAILABLE -> GROQ_SMOKE_READY
+
+======================================================================
+[STATE 3] GROQ DECISION SMOKE TEST
+----------------------------------------------------------------------
+Status: DONE
+
+Module:
+- app/smoke_test_groq_decision.py
+
+Verified test cases:
+1. Safe deny path
+2. Malformed JSON response
+3. BUY valid stop loss
+4. BUY invalid stop loss
+5. SELL valid stop loss
+6. SELL invalid stop loss
+7. Low confidence rejection
+8. Missing required fields
+9. Prompt builder
+10. Schema validation
+11. Live Groq API path
+
+Result:
+- passed in non-live mode
+- passed in live mode when GROQ_API_KEY configured
+
+Transition:
+GROQ_SMOKE_READY -> CANDIDATE_TO_GROQ_SMOKE_READY
+
+======================================================================
+[STATE 4] CANDIDATE -> GROQ INTEGRATION SMOKE PATH
+----------------------------------------------------------------------
+Status: DONE
+
+Module:
+- app/smoke_test_candidate_to_groq.py
+
+Verified flow:
+sample raw candidates
+  -> finalize_candidate_scan(...)
+  -> accepted candidates
+  -> GroqPromptBuilder.build_decision_prompt(...)
+  -> GroqClient.chat_completion(...)
+  -> GroqResponseParser.parse(...)
+  -> AIDecision
+
+Verified finalization behavior:
+- raw candidates: 3
+- accepted: 2
+- rejected: 1
+
+Verified live Groq behavior:
+- approved candidates processed through Groq: 2
+- AIDecision created successfully: 2
+- valid_response=True
+- approved=True in verified sample live path
+
+Transition:
+CANDIDATE_TO_GROQ_SMOKE_READY -> MAIN_GATED_INTEGRATION_READY
+
+======================================================================
+[STATE 5] GATED MAIN ENTRY INTEGRATION
+----------------------------------------------------------------------
+Status: DONE
+
+Module:
+- app/main.py
+
+Behavior:
+- default path unchanged
+- if RUN_CANDIDATE_TO_GROQ_SMOKE=1:
+    import and run candidate-to-groq smoke path
+- bootstrap remains intact
+- final success line still prints
+
+Verified:
+python app/main.py
+  -> normal bootstrap path
+
+PowerShell:
+$env:RUN_CANDIDATE_TO_GROQ_SMOKE="1"
+python app/main.py
+  -> bootstrap path
+  -> candidate-to-groq integration smoke path
+  -> live Groq path when GROQ_API_KEY configured
+  -> foundation success line preserved
+
+Transition:
+MAIN_GATED_INTEGRATION_READY -> OPTIONAL_NEXT_PHASE
+
+======================================================================
+OPTIONAL NEXT PHASE STATES
+======================================================================
+
+[STATE 6] RUNTIME CALLER IMPLEMENTATION
+----------------------------------------------------------------------
+Status: NOT IMPLEMENTED
+
+Description:
+Add a true runtime caller that uses live candidate flow rather than
+sample smoke data.
+
+Would require:
+- identifying real runtime scan cycle
+- routing accepted finalized candidates into Groq adapter
+- preserving bootstrap safety
+
+Blocked by:
+- no verified live production caller currently using
+  finalize_candidate_scan(...) in main runtime flow
+
+Transition candidate:
+OPTIONAL_NEXT_PHASE -> LIVE_RUNTIME_ORCHESTRATION
+
+======================================================================
+[STATE 7] LIVE RUNTIME ORCHESTRATION
+----------------------------------------------------------------------
+Status: NOT IMPLEMENTED
+
+Description:
+Real scan loop:
+market data -> feature engine -> candidate engine -> finalize ->
+Groq decision -> downstream action
+
+Not yet present in current verified main bootstrap path.
+
+======================================================================
+[STATE 8] EXECUTION PATH
+----------------------------------------------------------------------
+Status: NOT IMPLEMENTED
+
+Description:
+AIDecision -> execution routing / risk / broker order handling
+
+Not part of current repo state verified in this phase.
+
+======================================================================
+ASCII STATE TRANSITION MAP
+======================================================================
+
+    [FOUNDATION READY]
+             |
+             v
+ [CANDIDATE BOUNDARY AVAILABLE]
+             |
+             v
+     [GROQ ADAPTER AVAILABLE]
+             |
+             v
+      [GROQ SMOKE READY]
+             |
+             v
+[CANDIDATE TO GROQ SMOKE READY]
+             |
+             v
+ [MAIN GATED INTEGRATION READY]
+             |
+             v
+      [OPTIONAL NEXT PHASE]
+             |
+             +--> [RUNTIME CALLER IMPLEMENTATION]      (not implemented)
+             |
+             +--> [LIVE RUNTIME ORCHESTRATION]         (not implemented)
+             |
+             +--> [EXECUTION PATH]                     (not implemented)
+
+======================================================================
+DETAILED FLOW STATE MODEL
+======================================================================
+
+STATE: BOOTSTRAP_START
+  Action:
+  - enter app/main.py
+
+  Transition:
+  -> LOAD_CONFIG
+
+STATE: LOAD_CONFIG
+  Action:
+  - read YAML config
+  - validate settings
+
+  Success:
+  -> INIT_STORAGE
+
+  Failure:
+  -> BOOTSTRAP_FAIL
+
+STATE: INIT_STORAGE
+  Action:
+  - initialize storage/db paths
+
+  Success:
+  -> PRINT_RUNTIME_SUMMARY
+
+STATE: PRINT_RUNTIME_SUMMARY
+  Action:
+  - emit runtime summary JSON
+
+  Success:
+  -> CHECK_GATED_SMOKE_FLAG
+
+STATE: CHECK_GATED_SMOKE_FLAG
+  Condition:
+  - RUN_CANDIDATE_TO_GROQ_SMOKE == "1" ?
+
+  If NO:
+  -> FOUNDATION_COMPLETE
+
+  If YES:
+  -> RUN_CANDIDATE_TO_GROQ_SMOKE
+
+STATE: RUN_CANDIDATE_TO_GROQ_SMOKE
+  Action:
+  - import run_integration_test()
+  - build sample raw candidates
+  - call finalize_candidate_scan(...)
+
+  Success:
+  -> PROCESS_ACCEPTED_CANDIDATES
+
+STATE: PROCESS_ACCEPTED_CANDIDATES
+  Action:
+  - iterate accepted rows
+  - map row fields to Groq prompt input
+  - call prompt builder
+
+  Success:
+  -> GROQ_CALL_OR_SKIP
+
+STATE: GROQ_CALL_OR_SKIP
+  Condition:
+  - GROQ_API_KEY configured ?
+
+  If NO:
+  -> FAIL_CLOSED_DECISION
+
+  If YES:
+  -> LIVE_GROQ_CALL
+
+STATE: LIVE_GROQ_CALL
+  Action:
+  - call GroqClient.chat_completion(...)
+
+  Success:
+  -> PARSE_GROQ_RESPONSE
+
+  Failure:
+  -> FAIL_CLOSED_DECISION
+
+STATE: PARSE_GROQ_RESPONSE
+  Action:
+  - GroqResponseParser.parse(...)
+  - map into AIDecision
+
+  Success:
+  -> RECORD_AI_DECISION_OUTPUT
+
+  Failure:
+  -> FAIL_CLOSED_DECISION
+
+STATE: FAIL_CLOSED_DECISION
+  Action:
+  - produce deny-safe AIDecision
+  - valid_response=False when appropriate
+
+  Transition:
+  -> RECORD_AI_DECISION_OUTPUT
+
+STATE: RECORD_AI_DECISION_OUTPUT
+  Action:
+  - print candidate decision summary
+  - continue loop
+
+  Transition:
+  -> FOUNDATION_COMPLETE
+
+STATE: FOUNDATION_COMPLETE
+  Action:
+  - print foundation success line
+
+  End state:
+  - bootstrap-safe completion
+
+STATE: BOOTSTRAP_FAIL
+  Action:
+  - startup exception / config failure
+
+  End state:
+  - failure
+
+======================================================================
+LOCKED RULES PRESERVED IN CURRENT STATE
+======================================================================
+1. AIDecision remains authoritative contract
+2. app/main.py remains bootstrap entry
+3. Groq path is gated and not default
+4. No full runtime loop introduced into main.py
+5. No execution path introduced
+6. Existing architecture preserved
+7. Existing signatures preserved
+8. Integration proven through smoke path before runtime adoption
+
+======================================================================
+CURRENT TRUTH SUMMARY
+======================================================================
+DONE:
+- bootstrap foundation
+- candidate finalization boundary
+- Groq prompt/client/parser layer
+- Groq smoke validation
+- candidate-to-groq integration smoke test
+- gated app/main.py integration
+- live Groq verification
+
+NOT DONE:
+- live production runtime caller
+- main runtime market scan orchestration
+- execution path
+
+END OF FILE
