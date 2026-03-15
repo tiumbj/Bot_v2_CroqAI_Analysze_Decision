@@ -1,0 +1,384 @@
+State Diagram — Groq AI Decision Layer Only
+
+เวอร์ชัน: v2.1-groq-only
+
+วัตถุประสงค์
+อัปเดตเฉพาะส่วน Groq AI Decision Layer
+ไม่แตะส่วน MT5 / Feature / Candidate / Risk / Execution / Learning ที่อยู่นอกขอบเขตนี้
+
+==================================================
+1) GROQ SCOPE ที่ล็อกไว้
+==================================================
+
+Groq มีหน้าที่:
+- รับ candidate setup ที่ Python คัดแล้ว
+- วิเคราะห์ setup ตาม input ที่ส่งเข้าไปเท่านั้น
+- คืน structured JSON สำหรับ decision layer
+- ช่วย approve / reject setup
+- คืนเหตุผลเชิง technical แบบสั้น
+
+Groq ไม่มีสิทธิ์:
+- flip direction
+- กำหนด lot size
+- override risk policy
+- เปลี่ยน execution rule
+- เพิ่ม field นอก schema
+- ตอบข้อความนอก JSON
+
+Fail policy:
+- invalid JSON = reject
+- missing required key = reject
+- extra key = reject
+- enum invalid = reject
+- direction mismatch = reject
+
+==================================================
+2) GROQ FILES ที่เกี่ยวข้อง
+==================================================
+
+config/
+- ai.yaml
+  หน้าที่:
+  - เก็บ provider=groq
+  - model name
+  - timeout
+  - retry
+  - temperature
+  - prompt_version
+  - minimum_confidence
+
+core/
+- groq_client.py
+  หน้าที่:
+  - เชื่อม Groq API/SDK
+  - ส่ง messages
+  - รับ raw response
+  - timeout / retry / error handling
+
+- groq_prompt_builder.py
+  หน้าที่:
+  - แปลง candidate + feature summary เป็น prompt
+  - ล็อก system rules
+  - ล็อก output schema
+  - ห้าม model ตอบเกิน contract
+
+- groq_response_parser.py
+  หน้าที่:
+  - parse raw JSON string
+  - แปลงเป็น dict
+  - ตรวจ required keys
+  - ตรวจ extra keys
+  - ตรวจชนิดข้อมูลเบื้องต้น
+
+- groq_output_validator.py
+  หน้าที่:
+  - ตรวจ business rules หลัง parse
+  - approved เป็น bool
+  - confidence อยู่ใน 0..1
+  - market_state ต้องเป็น:
+    - trend
+    - range
+    - unclear
+  - setup_quality ต้องเป็น:
+    - A
+    - B
+    - C
+    - D
+  - BUY:
+    SL < entry_zone < TP
+  - SELL:
+    TP < entry_zone < SL
+  - ห้าม flip direction
+
+- groq_decision_service.py
+  หน้าที่:
+  - orchestration ของ Groq layer
+  - build prompt
+  - call Groq
+  - parse output
+  - validate output
+  - คืนผล decision ที่ระบบใช้ต่อได้
+
+app/
+- smoke_test_groq_decision.py
+  หน้าที่:
+  - ทดสอบ Groq layer แยกจาก runtime หลัก
+  - ยิง test cases
+  - ดู raw / parsed / validated result
+
+==================================================
+3) GROQ INPUT CONTRACT
+==================================================
+
+Input to Groq:
+- symbol
+- timeframe
+- setup_type
+- direction
+- current_price
+- entry_zone
+- stop_reference
+- target_reference
+- summarized indicators
+- structure summary
+- session
+- spread_state
+
+Indicator summary ที่ส่งได้:
+- ema20
+- ema50
+- ema200
+- ema20_slope
+- rsi14
+- macd_histogram
+- adx14
+- di_plus
+- di_minus
+- bollinger_width
+- atr14
+
+Structure summary ที่ส่งได้:
+- breakout
+- retest
+- nearest_resistance
+- nearest_support
+- room_to_target_atr
+- candle_quality
+
+ข้อบังคับ:
+- ส่งเฉพาะข้อมูลที่ Python มีจริง
+- ห้ามให้ Groq เดาข้อมูลที่ไม่มี
+- ห้ามให้ Groq คิด money management เอง
+
+==================================================
+4) GROQ OUTPUT CONTRACT (STRICT)
+==================================================
+
+Groq must return exactly:
+
+{
+  "approved": true,
+  "confidence": 0.0,
+  "market_state": "trend",
+  "setup_quality": "A",
+  "reason": "short technical reason",
+  "entry_zone": {
+    "min": 0.0,
+    "max": 0.0
+  },
+  "stop_loss": 0.0,
+  "take_profit": 0.0,
+  "risk_note": "short note",
+  "checkpoints": ["point1", "point2", "point3"]
+}
+
+Allowed values only:
+- market_state:
+  - trend
+  - range
+  - unclear
+
+- setup_quality:
+  - A
+  - B
+  - C
+  - D
+
+Not allowed:
+- risk_reward
+- position_sizing
+- recommendations
+- notes
+- market_state แบบ uptrend/downtrend/bullish/weak
+- setup_quality แบบ A-/B+/C-
+
+==================================================
+5) GROQ DECISION FLOW
+==================================================
+
+Python Candidate
+  -> Groq Prompt Builder
+  -> Groq Client Call
+  -> Raw JSON Response
+  -> Response Parser
+  -> Output Validator
+  -> Valid Decision
+  -> ส่งต่อให้ Risk / Execution Layer
+
+ถ้าพังที่ขั้นใดขั้นหนึ่ง:
+  -> reject
+  -> log error
+  -> ไม่ส่งต่อ execution
+
+==================================================
+6) STATE DIAGRAM — GROQ LAYER
+==================================================
+
+```mermaid
+stateDiagram-v2
+    [*] --> CandidateReady
+
+    CandidateReady --> BuildPrompt
+    BuildPrompt --> SendToGroq
+    SendToGroq --> ReceiveResponse
+
+    ReceiveResponse --> ParseJSON
+    ParseJSON --> RejectInvalidJSON: parse failed
+    ParseJSON --> ValidateSchema: parse passed
+
+    ValidateSchema --> RejectSchemaError: missing key / extra key / wrong type
+    ValidateSchema --> ValidateBusinessRules: schema passed
+
+    ValidateBusinessRules --> RejectPolicyError: direction mismatch / invalid enum / invalid SL-TP
+    ValidateBusinessRules --> DecisionAccepted: all checks passed
+
+    RejectInvalidJSON --> LogReject
+    RejectSchemaError --> LogReject
+    RejectPolicyError --> LogReject
+
+    DecisionAccepted --> ReturnValidatedDecision
+    LogReject --> [*]
+    ReturnValidatedDecision --> [*]
+
+    7) STATE DIAGRAM — GROQ MODULE DEPENDENCY
+
+
+
+    ==================================================
+8) CURRENT GROQ STATUS
+
+Done:
+
+config/ai.yaml exists
+
+AI layer role is already conceptually locked
+
+invalid AI JSON = reject rule is already locked
+
+AI must not flip direction rule is already locked
+
+AI must not set lot size rule is already locked
+
+Need implementation / wiring:
+
+core/groq_client.py
+
+core/groq_prompt_builder.py
+
+core/groq_response_parser.py
+
+core/groq_output_validator.py
+
+core/groq_decision_service.py
+
+app/smoke_test_groq_decision.py
+
+Need runtime integration:
+
+app/main.py must call groq_decision_service after candidate passes guard
+
+validated result only then can move to risk/execution layer
+
+==================================================
+9) GROQ FAILURE CASES
+
+Reject immediately when:
+
+response is empty
+
+response is not JSON
+
+JSON has extra keys
+
+JSON misses required keys
+
+approved is not boolean
+
+confidence is outside 0..1
+
+market_state not in allowed enum
+
+setup_quality not in allowed enum
+
+entry_zone invalid
+
+stop_loss invalid
+
+take_profit invalid
+
+BUY structure invalid
+
+SELL structure invalid
+
+model changes direction
+
+model suggests lot sizing
+
+model suggests override of stop/target policy
+
+==================================================
+10) GROQ TEST CASES
+
+Groq layer should pass these categories:
+
+clear BUY trend continuation
+
+clear SELL trend continuation
+
+weak / borderline setup
+
+trend conflict setup
+
+poor RR setup
+
+spread-wide execution context
+
+range market
+
+structure not confirmed
+
+fake-good setup with insufficient room
+
+Expected behavior:
+
+approve only when evidence is aligned
+
+reject when structure/risk/regime is weak
+
+confidence must be realistic
+
+output must stay inside strict schema every time
+
+==================================================
+11) FINAL LOCK
+
+Groq is a decision assistant layer only.
+Python remains the system authority.
+
+Authority split:
+
+Python owns:
+
+schema
+
+risk policy
+
+direction lock
+
+execution rules
+
+fail-closed behavior
+
+Groq owns:
+
+setup interpretation
+
+approve/reject opinion
+
+concise technical reasoning
+
+checkpoint summary
+
+Final rule:
+If Groq output is not exact and valid,
+system must reject it automatically.

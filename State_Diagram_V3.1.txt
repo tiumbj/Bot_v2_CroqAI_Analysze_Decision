@@ -1,0 +1,307 @@
+Bot_v2_Groq_AI_Analysze_Decision
+State Diagram / Runtime State Overview
+Version: v1.0.0
+Date: 2026-03-13
+
+Scope
+- Built from the repo structure and the confirmed runtime/integration status established in this conversation.
+- Focuses on the current project state after Groq parser/main/smoke-test fixes were committed and pushed.
+- Uses only existing project folders:
+  - app/
+  - config/
+  - core/
+  - models/
+  - storage/
+
+==================================================
+1) Current High-Level Runtime State
+==================================================
+
+[BOOTSTRAP]
+  |
+  v
+[LOAD CONFIG]
+  - config/settings.yaml
+  - config/risk.yaml
+  - config/ai.yaml
+  - config/model.yaml
+  - config/symbol.yaml
+  |
+  v
+[VALIDATE SCHEMAS]
+  - models/schemas.py
+  |
+  v
+[INITIALIZE STORAGE]
+  - storage/db.py
+  |
+  v
+[PRINT RUNTIME SUMMARY]
+  - app/main.py
+  |
+  v
+[PRINT GROQ SERVICE READINESS]
+  - app/main.py
+  |
+  v
+[FOUNDATION READY]
+
+Note:
+- app/main.py does NOT call live Groq API on startup.
+- Live Groq validation is executed via app/smoke_test_groq_decision.py.
+
+==================================================
+2) Confirmed Current States by Area
+==================================================
+
+A. Foundation Layer
+- app/main.py                        -> DONE
+- config/*.yaml                      -> DONE
+- models/schemas.py                  -> DONE
+- storage/db.py                      -> DONE
+
+B. Market / Feature / Candidate Base
+- core/mt5_gateway.py                -> EXISTS
+- core/market_data.py                -> EXISTS
+- core/feature_engine.py             -> EXISTS
+- core/candidate_engine.py           -> EXISTS
+- core/decision_validator.py         -> EXISTS
+- core/state_guard.py                -> EXISTS
+- core/symbol_registry.py            -> EXISTS
+- app/smoke_test_data_feature.py     -> EXISTS
+- app/smoke_test_candidate.py        -> EXISTS
+
+C. Groq Decision Layer
+- core/groq_client.py                -> EXISTS
+- core/groq_prompt_builder.py        -> EXISTS
+- core/groq_response_parser.py       -> DONE / FIXED
+- core/groq_decision_service.py      -> EXISTS
+- app/smoke_test_groq_decision.py    -> DONE / PASSED
+
+D. Runtime Wiring Status
+- Groq config wiring in app/main.py  -> READINESS ONLY
+- Live API startup call in main.py   -> NOT USED
+- Live Groq runtime smoke test       -> PASSED
+- Full candidate->Groq->DB runtime   -> NOT PROVEN IN MAIN LOOP
+
+==================================================
+3) File-by-Function Summary
+==================================================
+
+app/main.py
+- Loads and validates runtime config.
+- Initializes SQLite storage and log directory.
+- Prints runtime summary.
+- Prints Groq readiness without calling the API.
+- Current status: DONE.
+
+app/smoke_test_groq_decision.py
+- Tests safe deny parser path.
+- Tests live Groq decision service.
+- Validates output with AIDecision schema.
+- Current status: DONE / PASSED.
+
+app/smoke_test_data_feature.py
+- Verifies data + feature path.
+- Current status: EXISTS.
+
+app/smoke_test_candidate.py
+- Verifies candidate/validation path.
+- Current status: EXISTS.
+
+core/groq_client.py
+- Groq API client wrapper.
+- Uses retry logic.
+- Current status: EXISTS.
+
+core/groq_prompt_builder.py
+- Builds Groq prompt from candidate + feature snapshot.
+- Current status: EXISTS.
+
+core/groq_response_parser.py
+- Converts Groq JSON response into AIDecision-compatible dict.
+- Implements safe deny fallback.
+- Current status: DONE / FIXED.
+
+core/groq_decision_service.py
+- Orchestrates client + prompt builder + parser.
+- Current status: EXISTS.
+
+core/mt5_gateway.py
+- MT5 connection / broker gateway layer.
+- Current status: EXISTS.
+
+core/market_data.py
+- Loads symbol market frame.
+- Current status: EXISTS.
+
+core/feature_engine.py
+- Builds feature snapshot from market data.
+- Current status: EXISTS.
+
+core/candidate_engine.py
+- Deterministic candidate detection layer.
+- Current status: EXISTS.
+
+core/decision_validator.py
+- Dedupes / normalizes candidate decisions.
+- Current status: EXISTS.
+
+core/state_guard.py
+- Cooldown / one-trade-per-bar / open-position guard.
+- Current status: EXISTS.
+
+core/symbol_registry.py
+- Canonical symbol mapping across brokers/accounts.
+- Current status: EXISTS.
+
+models/schemas.py
+- Authoritative contracts for settings, features, candidates, AI decisions, execution, outcomes.
+- Current status: DONE.
+
+storage/db.py
+- SQLite initialization and storage tables.
+- Current status: DONE.
+
+==================================================
+4) Contract Authority
+==================================================
+
+Authoritative AI contract:
+- models/schemas.py :: AIDecision
+
+Meaning:
+- Groq output must be parsed/adapted into AIDecision.
+- Groq JSON is NOT the authoritative storage contract.
+- Parser is responsible for normalization and safe deny fallback.
+
+AIDecision required fields include:
+- candidate_id
+- decision
+- approved
+- confidence
+- entry_min
+- entry_max
+- stop_loss
+- setup_quality
+- trend_alignment
+- regime_fit
+- exhaustion_risk
+- reason
+- model_name
+- prompt_version
+- latency_ms
+- valid_response
+
+==================================================
+5) Confirmed Test State
+==================================================
+
+Confirmed in this conversation:
+- python app/main.py                     -> PASSED
+- python app/smoke_test_groq_decision.py -> PASSED
+- Safe deny path                         -> PASSED
+- Live Groq API test                     -> PASSED
+- AIDecision validation                  -> PASSED
+
+Confirmed git state in this conversation:
+- Commit pushed to main
+- Commit hash: 8f3a2b1
+- Working tree clean after push
+
+==================================================
+6) Mermaid State Diagram
+==================================================
+
+```mermaid
+stateDiagram-v2
+    [*] --> Bootstrap
+
+    state "Bootstrap" as Bootstrap
+    state "Load Config\nsettings/risk/ai/model/symbol" as LoadConfig
+    state "Validate Schemas\nmodels/schemas.py" as ValidateSchemas
+    state "Initialize Storage\nstorage/db.py" as InitStorage
+    state "Print Runtime Summary" as PrintSummary
+    state "Print Groq Readiness\n(no API call)" as PrintReadiness
+    state "Foundation Ready" as FoundationReady
+
+    state "Smoke Test Entry" as SmokeEntry
+    state "Safe Deny Parser Test" as SafeDenyTest
+    state "Groq Service Init" as GroqInit
+    state "Groq Health Check" as GroqHealth
+    state "Prompt Build" as PromptBuild
+    state "Live Groq Decision Call" as LiveGroqCall
+    state "Parse Response" as ParseResponse
+    state "AIDecision Validate" as ValidateAIDecision
+    state "Smoke Test Passed" as SmokePassed
+    state "Smoke Test Failed" as SmokeFailed
+
+    Bootstrap --> LoadConfig
+    LoadConfig --> ValidateSchemas
+    ValidateSchemas --> InitStorage
+    InitStorage --> PrintSummary
+    PrintSummary --> PrintReadiness
+    PrintReadiness --> FoundationReady
+
+    FoundationReady --> SmokeEntry
+    SmokeEntry --> SafeDenyTest
+    SafeDenyTest --> GroqInit
+    GroqInit --> GroqHealth
+    GroqHealth --> PromptBuild
+    PromptBuild --> LiveGroqCall
+    LiveGroqCall --> ParseResponse
+    ParseResponse --> ValidateAIDecision
+    ValidateAIDecision --> SmokePassed
+
+    GroqInit --> SmokeFailed: init error
+    GroqHealth --> SmokeFailed: health fail
+    LiveGroqCall --> SmokeFailed: API fail
+    ParseResponse --> SmokeFailed: parse fail
+    ValidateAIDecision --> SmokeFailed: schema fail
+==================================================
+7) Important Boundaries
+
+What is confirmed:
+
+Foundation bootstrap path is stable.
+
+Groq readiness is printed without startup API calls.
+
+Smoke test path successfully reaches live Groq and validates AIDecision.
+
+What is NOT yet claimed here:
+
+A fully wired production main loop that pulls real market data, builds features, scans candidates, calls Groq for each approved candidate, and persists all AI decisions automatically from app/main.py.
+
+That broader runtime may exist in parts, but it is not claimed here unless separately proven from the repo runtime path.
+
+==================================================
+8) Practical Next Implementation Order
+
+Keep app/main.py as foundation/bootstrap entry.
+
+Preserve AIDecision as authoritative contract.
+
+Keep Groq live calls out of startup path.
+
+If building full runtime next, wire in this order:
+
+MT5 gateway
+
+market data load
+
+feature build
+
+candidate scan
+
+decision validator / state guard
+
+Groq decision service
+
+AIDecision validation
+
+DB persistence
+
+Add runtime proof only after actual main-loop integration is verified.
+
+End of file.

@@ -1,0 +1,350 @@
+Bot_v2_Groq_AI_Analysze_Decision
+Project Diagram
+Version: v2.0.0
+
+======================================================================
+1) PROJECT PURPOSE
+======================================================================
+This repository is a production-oriented staged trading decision system
+focused on:
+
+- deterministic candidate generation
+- candidate normalization / alias-aware deduplication
+- Groq-based AI decision confirmation
+- authoritative AI decision contract via models/schemas.py
+- bootstrap-safe integration path
+- no full execution runtime loop yet in app/main.py
+
+The repo currently supports:
+- foundation/bootstrap startup
+- candidate finalization boundary
+- Groq adapter layer
+- candidate-to-groq integration smoke test
+- optional gated smoke path through app/main.py
+
+======================================================================
+2) CURRENT HIGH-LEVEL STRUCTURE
+======================================================================
+Bot_v2_Groq_AI_Analysze_Decision/
+│
+├── app/
+│   ├── main.py
+│   │   - foundation/bootstrap entry
+│   │   - loads config
+│   │   - validates runtime settings
+│   │   - initializes storage
+│   │   - prints runtime summary
+│   │   - optional gated smoke path:
+│   │       RUN_CANDIDATE_TO_GROQ_SMOKE=1
+│   │
+│   ├── smoke_test_candidate.py
+│   │   - verifies candidate postprocessing behavior
+│   │   - verifies alias-aware dedupe behavior
+│   │
+│   ├── smoke_test_groq_decision.py
+│   │   - verifies Groq parser/prompt/client layer
+│   │   - verifies fail-closed paths
+│   │   - verifies schema-valid AIDecision generation
+│   │
+│   └── smoke_test_candidate_to_groq.py
+│       - integration smoke path
+│       - raw candidates
+│       - finalize_candidate_scan(...)
+│       - accepted candidates
+│       - Groq prompt builder
+│       - Groq client
+│       - Groq response parser
+│       - AIDecision output
+│
+├── config/
+│   ├── ai.yaml
+│   │   - Groq provider settings
+│   │   - model selection
+│   │   - minimum confidence
+│   │   - JSON response requirements
+│   │
+│   ├── settings.yaml
+│   ├── risk.yaml
+│   ├── model.yaml
+│   └── symbol.yaml
+│
+├── core/
+│   ├── candidate_engine.py
+│   │   - deterministic candidate detection
+│   │   - no AI logic
+│   │   - no execution logic
+│   │
+│   ├── state_guard.py
+│   ├── logger_engine.py
+│   ├── symbol_registry.py
+│   │   - symbol alias normalization
+│   │   - GOLD / XAUUSD / XAUUSDm support
+│   │
+│   ├── decision_validator.py
+│   │   - dedupe / normalize / validation behavior
+│   │
+│   ├── candidate_pipeline_postprocessor.py
+│   │   - post-detection candidate processing
+│   │   - accepted / rejected / summary / log lines
+│   │   - boundary before AI confirm / execution
+│   │
+│   ├── candidate_scan_finalize.py
+│   │   - clean integration point for runtime pipeline
+│   │   - finalize raw scan results
+│   │   - route approved rows to AI confirm / execution
+│   │
+│   ├── runtime_candidate_reporter.py
+│   │   - thin wrapper over postprocessor
+│   │
+│   ├── groq_prompt_builder.py
+│   │   - builds system/user prompt for Groq
+│   │
+│   ├── groq_client.py
+│   │   - transport/client layer for Groq API
+│   │   - reads GROQ_API_KEY from environment
+│   │   - returns content/model_name/latency/error metadata
+│   │
+│   └── groq_response_parser.py
+│       - parses model output into AIDecision
+│       - fail-closed behavior
+│       - schema-valid deny path
+│
+├── models/
+│   └── schemas.py
+│       - authoritative repo contracts
+│       - includes AIDecision
+│
+├── storage/
+│   └── bot.db / runtime data
+│
+├── State_Diagram_V1.txt
+├── State_Diagram_V2.txt
+├── State_Diagram_V3.txt
+├── State_Diagram_V3.1.txt
+│
+└── project_diagram_v2.txt
+    state_diagram_v2.txt
+
+======================================================================
+3) AUTHORITATIVE DECISION CONTRACT
+======================================================================
+models/schemas.py :: AIDecision is the authoritative AI decision contract.
+
+Groq output must be adapted into AIDecision.
+
+Important AIDecision fields:
+- candidate_id
+- decision
+- approved
+- confidence
+- entry_min
+- entry_max
+- stop_loss
+- setup_quality
+- trend_alignment
+- regime_fit
+- exhaustion_risk
+- reason
+- model_name
+- prompt_version
+- latency_ms
+- valid_response
+
+Important rule:
+- Do not silently change this contract
+- Parser must map model output into this schema
+- Fail closed on malformed responses
+
+======================================================================
+4) CURRENT FUNCTIONAL FLOW
+======================================================================
+A) Bootstrap path
+----------------------------------------------------------------------
+app/main.py
+  -> load config
+  -> validate config
+  -> initialize storage
+  -> print runtime summary
+  -> normal bootstrap success
+
+B) Candidate path
+----------------------------------------------------------------------
+raw market/candidate rows
+  -> candidate_engine.py
+  -> decision_validator.py
+  -> candidate_pipeline_postprocessor.py
+  -> candidate_scan_finalize.py
+  -> finalized output:
+       accepted / rejected / all_items / log_lines / summary
+
+C) Groq adapter path
+----------------------------------------------------------------------
+accepted candidate
+  -> groq_prompt_builder.py
+  -> groq_client.py
+  -> groq_response_parser.py
+  -> AIDecision
+
+D) Gated integration path through main.py
+----------------------------------------------------------------------
+app/main.py
+  -> normal bootstrap
+  -> if RUN_CANDIDATE_TO_GROQ_SMOKE=1:
+       from app.smoke_test_candidate_to_groq import run_integration_test
+       run_integration_test()
+  -> print foundation success line
+
+======================================================================
+5) ASCII FLOW DIAGRAM
+======================================================================
+                        ┌─────────────────────┐
+                        │     app/main.py     │
+                        │ foundation bootstrap│
+                        └─────────┬───────────┘
+                                  │
+                                  │ normal path
+                                  ▼
+                    ┌──────────────────────────────┐
+                    │ config load / validation /   │
+                    │ storage init / summary print │
+                    └──────────────────────────────┘
+
+                                  │
+                                  │ if RUN_CANDIDATE_TO_GROQ_SMOKE=1
+                                  ▼
+
+                 ┌─────────────────────────────────────┐
+                 │ app/smoke_test_candidate_to_groq.py │
+                 └─────────────────┬───────────────────┘
+                                   │
+                                   ▼
+                    ┌─────────────────────────────┐
+                    │ build sample raw candidates │
+                    └──────────────┬──────────────┘
+                                   │
+                                   ▼
+                 ┌────────────────────────────────────┐
+                 │ core/candidate_scan_finalize.py    │
+                 │ finalize_candidate_scan(...)       │
+                 └──────────────┬─────────────────────┘
+                                │
+                 ┌──────────────┴───────────────┐
+                 ▼                              ▼
+      ┌────────────────────┐         ┌────────────────────┐
+      │ accepted candidates │         │ rejected candidates│
+      └──────────┬─────────┘         └────────────────────┘
+                 │
+                 ▼
+      ┌────────────────────────────┐
+      │ core/groq_prompt_builder.py│
+      └──────────┬─────────────────┘
+                 │
+                 ▼
+      ┌───────────────────────┐
+      │ core/groq_client.py   │
+      │ live or fail-closed   │
+      └──────────┬────────────┘
+                 │
+                 ▼
+      ┌─────────────────────────────┐
+      │ core/groq_response_parser.py│
+      └──────────┬──────────────────┘
+                 │
+                 ▼
+      ┌─────────────────────────────┐
+      │      models.AIDecision      │
+      └─────────────────────────────┘
+
+======================================================================
+6) VERIFIED BEHAVIOR
+======================================================================
+Verified already:
+- app/main.py bootstrap path works
+- candidate postprocessing smoke test works
+- Groq parser/prompt/client smoke test works
+- fail-closed parser behavior works
+- schema validation works
+- candidate-to-groq integration smoke path works
+- live Groq API verification works
+- gated main.py integration path works
+
+Verified live behavior:
+- approved candidates can be sent through Groq
+- Groq responds with valid model output
+- parser returns valid AIDecision
+- valid_response=True on valid model output
+- approved=True on valid response cases tested
+
+======================================================================
+7) CURRENT BOUNDARIES
+======================================================================
+What exists now:
+- bootstrap foundation
+- candidate finalization boundary
+- Groq decision adapter layer
+- gated smoke integration path
+
+What does NOT exist yet:
+- full production runtime scan loop in app/main.py
+- full persistent runtime orchestration
+- execution engine wiring from AIDecision
+- database-backed AI decision history workflow
+- live production candidate polling loop from main bootstrap path
+
+======================================================================
+8) SAFE OPERATION MODES
+======================================================================
+Mode 1: Normal bootstrap
+----------------------------------------------------------------------
+python app/main.py
+
+Behavior:
+- config load
+- storage init
+- runtime summary
+- no Groq integration smoke path executed
+
+Mode 2: Gated candidate-to-groq smoke path
+----------------------------------------------------------------------
+PowerShell:
+$env:RUN_CANDIDATE_TO_GROQ_SMOKE="1"
+python app/main.py
+
+Behavior:
+- bootstrap path runs
+- candidate-to-groq smoke path runs
+- Groq live path runs only if GROQ_API_KEY is configured
+
+Mode 3: Direct integration smoke test
+----------------------------------------------------------------------
+python app/smoke_test_candidate_to_groq.py
+
+Behavior:
+- finalization + Groq integration test only
+
+======================================================================
+9) ENVIRONMENT VARIABLES
+======================================================================
+Required for live Groq call:
+- GROQ_API_KEY
+
+Optional gated main entry:
+- RUN_CANDIDATE_TO_GROQ_SMOKE=1
+
+======================================================================
+10) PROJECT STATUS SUMMARY
+======================================================================
+STATUS: INTEGRATION MILESTONE REACHED
+
+Reached:
+- Candidate finalization boundary
+- Groq adapter layer
+- Live Groq integration smoke path
+- Gated main.py connection without breaking bootstrap path
+
+Not yet reached:
+- Full production runtime loop
+- Full execution path
+- Full orchestration from live market scan to final order execution
+
+END OF FILE
