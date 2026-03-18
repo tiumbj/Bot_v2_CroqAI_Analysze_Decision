@@ -1,0 +1,79 @@
+State Diagram - Bot_v2_Groq_AI_Analysze_Decision
+Source basis: uploaded project state summary
+
+Mermaid:
+```mermaid
+stateDiagram-v2
+    [*] --> Bootstrap
+
+    state "Bootstrap / Init" as Bootstrap
+    state "Main Entrypoint" as Main
+    state "Production Runtime Loop" as ProdLoop
+    state "Position Monitor Loop" as PosMon
+    state "Candidate->Groq Smoke" as Smoke
+    state "Load Market Data" as LoadData
+    state "Build Snapshot" as Snapshot
+    state "Detect Raw Candidates" as Detect
+    state "Finalize Candidates" as Finalize
+    state "Dedup Check\n(processed_setups)" as Dedup
+    state "Groq Prompt Build" as Prompt
+    state "Groq Request" as GroqReq
+    state "Parse AI Response" as ParseAI
+    state "Write ai_decisions.jsonl" as AILog
+    state "Position Exit Eval" as ExitEval
+    state "Close Execution Gate" as CloseGate
+    state "Write position_monitor.jsonl" as PosLog
+    state "Persistent Dedup State\n(proposed next step)" as PersistDedup
+
+    Bootstrap --> Main
+
+    Main --> PosMon : RUN_POSITION_MONITOR=1
+    Main --> ProdLoop : RUN_PRODUCTION_RUNTIME=1
+    Main --> Smoke : RUN_CANDIDATE_TO_GROQ_SMOKE=1
+
+    state ProdLoop {
+        [*] --> LoadData
+        LoadData --> Snapshot
+        Snapshot --> Detect
+        Detect --> Finalize
+        Finalize --> Dedup
+        Dedup --> Prompt : setup_id not seen
+        Dedup --> Finalize : duplicate in memory only
+        Prompt --> GroqReq
+        GroqReq --> ParseAI
+        ParseAI --> AILog
+        AILog --> LoadData : next cycle
+    }
+
+    state PosMon {
+        [*] --> ExitEval
+        ExitEval --> CloseGate
+        CloseGate --> PosLog : ENABLE_POSITION_CLOSE_EXECUTION=1
+        CloseGate --> ExitEval : close disabled / no exit
+        PosLog --> ExitEval
+    }
+
+    Smoke --> [*]
+
+    Dedup --> PersistDedup : next strict production step
+    PersistDedup --> Prompt : restart-safe setup_id allowed once
+    PersistDedup --> Finalize : restart-safe duplicate blocked
+```
+
+Plain-language state summary:
+1. System starts at Bootstrap/Init and enters the main entrypoint.
+2. main() selects one of three runtime modes:
+   - RUN_POSITION_MONITOR=1
+   - RUN_PRODUCTION_RUNTIME=1
+   - RUN_CANDIDATE_TO_GROQ_SMOKE=1
+3. In production runtime, the loop is:
+   Load Market Data -> Build Snapshot -> Detect Raw Candidates -> Finalize Candidates -> Dedup Check -> Groq Prompt -> Groq Request -> Parse AI Response -> Write ai_decisions.jsonl -> next cycle.
+4. In position monitor mode, the loop is:
+   Position Exit Eval -> Close Execution Gate -> Write position_monitor.jsonl -> next cycle.
+5. Confirmed production gap from the uploaded file:
+   processed_setups is in-memory only, so restart can re-send the same setup to Groq.
+6. Next strict production-phase step from the uploaded file:
+   add persistent setup dedup / restart-safe runtime state in app/main.py.
+
+Recommended render title:
+Bot_v2 Groq Production Runtime State Diagram

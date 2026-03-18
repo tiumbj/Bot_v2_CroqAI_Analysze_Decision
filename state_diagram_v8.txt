@@ -1,0 +1,137 @@
+state_diagram.txtAI TRADE COMMAND CONSOLE + DASHBOARD STATE WRITER
+State Diagram
+Version: v1.0
+
+[START]
+  ->
+[BOOTSTRAP]
+  - load config
+  - resolve project root
+  - prepare runtime path
+  - prepare dashboard_state.json target
+  ->
+[INIT DASHBOARD WRITER]
+  - create DashboardStateWriter
+  - ensure runtime/ exists
+  - ensure atomic write path ready
+  ->
+[INIT DASHBOARD RENDERER]
+  - create terminal layout
+  - create fixed panels
+  - create live refresh loop
+  ->
+[WAIT FOR RUNTIME STATE]
+  - if state file missing -> DEGRADED / MISSING / NO_DATA
+  - if state file exists -> LOAD STATE
+  ->
+[LOAD STATE]
+  - read runtime/dashboard_state.json
+  - parse json
+  - validate schema fields
+  - merge into dashboard state
+  ->
+[STATE HEALTH CHECK]
+  - if json invalid -> JSON LOAD ERROR
+  - if file stale -> STALE STATE
+  - if fresh -> NOMINAL STATE
+  ->
++-----------------------------+
+| NOMINAL STATE               |
+| - render live values        |
+| - render ingest status      |
+| - render analytics          |
+| - render guard              |
+| - render core power         |
+| - render trader mentor      |
+| - render position monitor   |
+| - render event stream       |
+| - render daily report       |
++-----------------------------+
+  ->
+[REFRESH LOOP]
+  - refresh heartbeat
+  - refresh time
+  - refresh panel states
+  - redraw screen
+  ->
+[WAIT FOR NEXT UPDATE]
+  ->
+[LOAD STATE]  (loop)
+
+Error / degraded branches:
+[WAIT FOR RUNTIME STATE]
+  -> [MISSING STATE FILE]
+     - system=DEGRADED
+     - feed=MISSING
+     - ticks=NO_DATA
+     - trader mentor = runtime not available
+     -> [REFRESH LOOP]
+
+[LOAD STATE]
+  -> [JSON LOAD ERROR]
+     - keep last safe state if any
+     - push event log
+     - system=DEGRADED
+     -> [REFRESH LOOP]
+
+[STATE HEALTH CHECK]
+  -> [STALE STATE]
+     - system=STALE
+     - feed=STALE
+     - ticks=STALE
+     - reason=runtime state stale
+     - trader mentor = do not execute
+     -> [REFRESH LOOP]
+
+Writer side:
+[START]
+  ->
+[INIT WRITER]
+  - create DashboardStateWriter
+  - ensure runtime dir
+  ->
+[COLLECT SOURCE DATA]
+  - header/system data
+  - data ingest data
+  - live analytics data
+  - execution guard data
+  - core power data
+  - trader mentor text
+  - position monitor data
+  - daily report data
+  - event stream
+  ->
+[BUILD PAYLOAD]
+  - normalize values
+  - clamp power metrics
+  - build schema_version
+  - build generated_utc
+  ->
+[ATOMIC WRITE]
+  - write temp file
+  - flush
+  - fsync
+  - os.replace(temp, dashboard_state.json)
+  ->
+[WRITE SUCCESS]
+  ->
+[WAIT NEXT RUNTIME CYCLE]
+  ->
+[COLLECT SOURCE DATA]  (loop)
+
+Writer error branch:
+[ATOMIC WRITE]
+  -> [WRITE ERROR]
+     - log error
+     - do not corrupt existing dashboard_state.json
+     -> [WAIT NEXT RUNTIME CYCLE]
+
+Integration overview:
+app/main.py
+  -> collect runtime facts
+  -> call DashboardStateWriter.write(...)
+  -> produce runtime/dashboard_state.json
+terminal_dashboard.py
+  -> read runtime/dashboard_state.json
+  -> validate freshness
+  -> render production dashboard

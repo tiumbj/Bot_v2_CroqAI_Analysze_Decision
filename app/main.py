@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from dashboard_state_writer import DashboardStateWriter
 
+from core.alert_system import alert_system  # noqa: E402
 from models.schemas import (  # noqa: E402
     AISettings,
     AppSettings,
@@ -493,7 +494,22 @@ def main() -> int:
                 except Exception as exc:
                     print(f"[DASHBOARD-WRITER] append_monitor_log failed: {exc}")
 
-            def eval_exit_action(snapshot: Any, side: str, profit_points: float) -> tuple[str, str]:
+            # request = {
+            #     # ... ค่าอื่นๆ ...
+            #     "magic": entry_magic,
+            #     "comment": entry_comment,
+            # }
+            def eval_exit_action(
+                snapshot: Any, 
+                side: str, 
+                profit_points: float, 
+                atr: float = 0.0,
+                entry_price: float = 0.0,
+                current_price: float = 0.0,
+                sl: float = 0.0,
+                tp: float = 0.0,
+                symbol: str = ""
+            ) -> tuple[str, str]:
                 close = float(getattr(snapshot, "close", 0.0) or 0.0)
                 ema20 = float(getattr(snapshot, "ema_20", 0.0) or 0.0)
                 ema50 = float(getattr(snapshot, "ema_50", 0.0) or 0.0)
@@ -501,25 +517,57 @@ def main() -> int:
                 rsi = float(getattr(snapshot, "rsi_14", 0.0) or 0.0)
                 macd_hist = float(getattr(snapshot, "macd_histogram", 0.0) or 0.0)
 
+                # --- Smart Trade Management: Break-even & Let Profit Run ---
+                if entry_price > 0 and sl > 0 and tp > 0:
+                    total_risk = abs(entry_price - sl)
+                    current_profit = abs(current_price - entry_price)
+                    
+                    if side == "BUY" and current_price > entry_price:
+                        # ถ้าราคาวิ่งไปได้ 1 เท่าของความเสี่ยง (1R) ให้พิจารณาเลื่อน SL บังทุน (ในแง่ของ Monitor คือถ้าตกลงมาถึงทุนให้ปิดเลย)
+                        if current_profit >= total_risk and close < ema20:
+                            return ("CLOSE_EARLY", "smart_management_breakeven_protect")
+                            
+                        # Let Profit Run: ถ้าโมเมนตัมยังแรงมาก ปล่อยไหล ไม่ต้องปิดก่อน
+                        if current_profit >= (total_risk * 1.5) and macd_hist > 0.0 and rsi > 60.0:
+                            return ("HOLD", "smart_management_let_profit_run")
+                            
+                    elif side == "SELL" and current_price < entry_price:
+                        if current_profit >= total_risk and close > ema20:
+                            return ("CLOSE_EARLY", "smart_management_breakeven_protect")
+                            
+                        if current_profit >= (total_risk * 1.5) and macd_hist < 0.0 and rsi < 40.0:
+                            return ("HOLD", "smart_management_let_profit_run")
+
+                # --- 1. Aggressive Profit Protection ---
+                if profit_points > (min_profit_points * 2.0):
+                    # ถ้ากำไรเยอะแล้ว ให้ไวต่อการกลับตัวมากขึ้น
+                    if side == "BUY" and (close < ema20 or macd_hist < 0.0):
+                        return ("CLOSE_EARLY", "deep_profit_protect_bearish")
+                    if side == "SELL" and (close > ema20 or macd_hist > 0.0):
+                        return ("CLOSE_EARLY", "deep_profit_protect_bullish")
+
+                # --- 2. Dynamic Exit / Loss Mitigation (ตัดขาดทุนไวขึ้น ไม่รอจนถึงกำไร) ---
                 if side == "BUY":
-                    force = close < ema50 and ema20_slope < 0.0 and macd_hist < 0.0
+                    # ตัดขาดทุนรุนแรง (FORCE_EXIT) - หลุด EMA20 และโมเมนตัมเปลี่ยน (เร็วกว่าเดิมที่ไม่ต้องรอหลุด EMA50)
+                    force = close < ema20 and ema20_slope < 0.0 and macd_hist < 0.0
                     if force:
                         return ("FORCE_EXIT", "force_reversal_bearish")
 
-                    early_signal = close < ema20 and (ema20_slope < 0.0 or macd_hist < 0.0 or rsi < 50.0)
-                    if profit_points >= min_profit_points and profit_points > 0.0 and early_signal:
-                        return ("CLOSE_EARLY", "profit_protect_reversal_bearish")
+                    # สัญญาณเตือนเบื้องต้น (CLOSE_EARLY) - ไม่จำเป็นต้องมีกำไรก็ตัดหนีได้ถ้ารูปแบบเสีย
+                    early_signal = close < ema20 and (macd_hist < 0.0 or rsi < 45.0)
+                    if early_signal:
+                        return ("CLOSE_EARLY", "mitigate_loss_reversal_bearish")
 
                     return ("HOLD", "no_exit_signal")
 
                 if side == "SELL":
-                    force = close > ema50 and ema20_slope > 0.0 and macd_hist > 0.0
+                    force = close > ema20 and ema20_slope > 0.0 and macd_hist > 0.0
                     if force:
                         return ("FORCE_EXIT", "force_reversal_bullish")
 
-                    early_signal = close > ema20 and (ema20_slope > 0.0 or macd_hist > 0.0 or rsi > 50.0)
-                    if profit_points >= min_profit_points and profit_points > 0.0 and early_signal:
-                        return ("CLOSE_EARLY", "profit_protect_reversal_bullish")
+                    early_signal = close > ema20 and (macd_hist > 0.0 or rsi > 55.0)
+                    if early_signal:
+                        return ("CLOSE_EARLY", "mitigate_loss_reversal_bullish")
 
                     return ("HOLD", "no_exit_signal")
 
@@ -569,7 +617,11 @@ def main() -> int:
                     return (False, str(exc))
 
             monitor_symbols: list[str] = []
+            ignored_runtime_symbols = {"XAUUSD", "XAUUSDM"}
             for symbol in runtime.app_settings.symbols:
+                if str(symbol).upper().strip() in ignored_runtime_symbols:
+                    print(f"[MONITOR] {symbol} side=NA action=HOLD ticket=NA reason=symbol_ignored")
+                    continue
                 try:
                     gateway.ensure_symbol_selected(symbol)
                     monitor_symbols.append(symbol)
@@ -717,7 +769,18 @@ def main() -> int:
                                 )
                                 continue
 
-                            action, reason = eval_exit_action(snapshot, side, profit_points)
+                            atr_val = float(getattr(snapshot, "atr_14", getattr(snapshot, "atr", 0.0)) or 0.0)
+                            action, reason = eval_exit_action(
+                                snapshot=snapshot, 
+                                side=side, 
+                                profit_points=profit_points, 
+                                atr=atr_val,
+                                entry_price=price_open,
+                                current_price=current_price,
+                                sl=sl,
+                                tp=tp,
+                                symbol=pos_symbol
+                            )
                             print(
                                 f"[MONITOR] {pos_symbol} side={side} action={action} ticket={ticket} "
                                 f"reason={reason}"
@@ -864,6 +927,13 @@ def main() -> int:
                             )
                             continue
 
+                        # Alert for candidate detection
+                        alert_system.candidate_detected(
+                            symbol=candidate.symbol,
+                            direction=candidate.direction,
+                            score=candidate.score
+                        )
+
                         raw_candidate = {
                             "symbol": candidate.symbol,
                             "timeframe": candidate.timeframe,
@@ -916,6 +986,10 @@ def main() -> int:
             from core.mt5_gateway import MT5Gateway
             import time
             from datetime import datetime
+            try:
+                import MetaTrader5 as mt5
+            except Exception:
+                mt5 = None
 
             interval_raw = os.getenv("PRODUCTION_RUNTIME_INTERVAL_SECONDS", "").strip()
             if not interval_raw:
@@ -968,6 +1042,155 @@ def main() -> int:
 
             ai_log_path = PROJECT_ROOT / "storage" / "ai_decisions.jsonl"
             ai_log_path.parent.mkdir(parents=True, exist_ok=True)
+            enable_entry_execution_raw = os.getenv("ENABLE_ENTRY_EXECUTION", "").strip().lower()
+            if enable_entry_execution_raw in {"1", "true", "yes", "on"}:
+                enable_entry_execution = True
+            elif enable_entry_execution_raw in {"0", "false", "no", "off"}:
+                enable_entry_execution = False
+            else:
+                enable_entry_execution = not runtime.app_settings.dry_run
+            entry_magic_raw = os.getenv("PRODUCTION_ENTRY_MAGIC", "").strip()
+            entry_magic = int(entry_magic_raw) if entry_magic_raw.isdigit() else 190058
+            entry_comment = os.getenv("PRODUCTION_ENTRY_COMMENT", "Groq_AI").strip() or "Groq_AI"
+            entry_deviation_raw = os.getenv("PRODUCTION_ENTRY_DEVIATION", "").strip()
+            entry_deviation = 20
+            if entry_deviation_raw:
+                try:
+                    entry_deviation = max(int(entry_deviation_raw), 1)
+                except ValueError:
+                    entry_deviation = 20
+            entry_volume_raw = os.getenv("PRODUCTION_ENTRY_VOLUME_LOTS", "").strip()
+            requested_entry_volume: float | None = None
+            if entry_volume_raw:
+                try:
+                    requested_entry_volume = float(entry_volume_raw)
+                except ValueError:
+                    requested_entry_volume = None
+            if enable_entry_execution and runtime.app_settings.dry_run:
+                print("Production runtime warning: ENABLE_ENTRY_EXECUTION=1 but dry_run=true, execution disabled")
+                enable_entry_execution = False
+            if enable_entry_execution and mt5 is None:
+                print("Production runtime warning: MetaTrader5 module unavailable, execution disabled")
+                enable_entry_execution = False
+            print(f"[EXEC-CONFIG] enabled={enable_entry_execution} magic={entry_magic} comment={entry_comment}")
+            executed_entry_setups: set[str] = set()
+
+            def _normalize_trade_side(decision_text: str) -> str:
+                text = str(decision_text or "").upper().strip()
+                if text.endswith("BUY") or text == "BUY":
+                    return "BUY"
+                if text.endswith("SELL") or text == "SELL":
+                    return "SELL"
+                return ""
+
+            def _calculate_dynamic_volume(
+                symbol_name: str,
+                entry_price: float,
+                sl_price: float,
+                risk_pct: float
+            ) -> float:
+                symbol_info = mt5.symbol_info(symbol_name) if mt5 is not None else None
+                minimum = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
+                maximum = float(getattr(symbol_info, "volume_max", minimum) or minimum)
+                step = float(getattr(symbol_info, "volume_step", 0.01) or 0.01)
+
+                if requested_entry_volume is not None:
+                    raw = requested_entry_volume
+                else:
+                    try:
+                        account = mt5.account_info()
+                        if account is None or entry_price <= 0 or sl_price <= 0 or abs(entry_price - sl_price) < 0.00001:
+                            raw = minimum
+                        else:
+                            equity = float(account.equity)
+                            risk_amount = equity * (risk_pct / 100.0)
+                            
+                            point = float(getattr(symbol_info, "point", 0.00001) or 0.00001)
+                            tick_value = float(getattr(symbol_info, "trade_tick_value", 0.0) or 0.0)
+                            tick_size = float(getattr(symbol_info, "trade_tick_size", point) or point)
+                            
+                            if tick_value > 0 and tick_size > 0:
+                                sl_distance_points = abs(entry_price - sl_price) / point
+                                point_value_per_lot = tick_value / (tick_size / point)
+                                risk_per_lot = sl_distance_points * point_value_per_lot
+                                
+                                if risk_per_lot > 0:
+                                    raw = risk_amount / risk_per_lot
+                                else:
+                                    raw = minimum
+                            else:
+                                raw = minimum
+                    except Exception as e:
+                        print(f"[VOL-CALC-ERROR] {e}")
+                        raw = minimum
+
+                clamped = min(max(raw, minimum), maximum)
+                units = round(clamped / step)
+                return float(round(units * step, 2))
+
+            def _execute_entry_order(
+                *,
+                symbol_name: str,
+                side: str,
+                setup_id: str,
+                sl: float,
+                tp: float,
+            ) -> tuple[bool, str, int | None]:
+                if mt5 is None:
+                    return (False, "mt5_module_unavailable", None)
+                if setup_id in executed_entry_setups:
+                    return (False, "setup_already_executed", None)
+                open_positions = gateway.get_positions_by_symbol(symbol_name)
+                managed_open_positions = [
+                    pos
+                    for pos in open_positions
+                    if int(pos.get("magic", 0) or 0) == entry_magic
+                    or str(pos.get("comment", "") or "").strip() == entry_comment
+                ]
+                if len(managed_open_positions) >= runtime.risk_settings.max_open_positions_per_symbol:
+                    return (False, "blocked_open_position_limit", None)
+
+                resolved = gateway.ensure_symbol_selected(symbol_name)
+                tick = mt5.symbol_info_tick(resolved)
+                if tick is None:
+                    code, message = mt5.last_error()
+                    return (False, f"tick_unavailable code={code} message={message}", None)
+
+                order_type = mt5.ORDER_TYPE_BUY if side == "BUY" else mt5.ORDER_TYPE_SELL
+                price = float(tick.ask) if side == "BUY" else float(tick.bid)
+                
+                volume = _calculate_dynamic_volume(
+                    symbol_name=resolved,
+                    entry_price=price,
+                    sl_price=sl,
+                    risk_pct=runtime.risk_settings.risk_per_trade_pct
+                )
+                
+                request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": resolved,
+                    "volume": volume,
+                    "type": order_type,
+                    "price": price,
+                    "sl": float(sl) if sl > 0.0 else 0.0,
+                    "tp": float(tp) if tp > 0.0 else 0.0,
+                    "deviation": entry_deviation,
+                    "magic": entry_magic,
+                    "comment": entry_comment,
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": mt5.ORDER_FILLING_IOC,
+                }
+                result = mt5.order_send(request)
+                if result is None:
+                    code, message = mt5.last_error()
+                    return (False, f"order_send_failed code={code} message={message}", None)
+
+                retcode = getattr(result, "retcode", None)
+                ticket = int(getattr(result, "order", 0) or 0) or None
+                if retcode in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL):
+                    executed_entry_setups.add(setup_id)
+                    return (True, f"retcode={retcode}", ticket)
+                return (False, f"retcode={retcode}", ticket)
 
             reported_failures: set[str] = set()
             available_symbols: list[str] = []
@@ -983,8 +1206,12 @@ def main() -> int:
                 )
                 feature_engine = FeatureEngine()
                 candidate_engine = CandidateEngine()
+                ignored_runtime_symbols = {"XAUUSD", "XAUUSDM"}
 
                 for symbol in runtime.app_settings.symbols:
+                    if str(symbol).upper().strip() in ignored_runtime_symbols:
+                        print(f"Production runtime skip symbol: {symbol} (ignored)")
+                        continue
                     try:
                         market_data.load_symbol_frame(symbol)
                         available_symbols.append(symbol)
@@ -1205,6 +1432,9 @@ def main() -> int:
 
                             parser_candidate_data: dict[str, Any] = {
                                 "candidate_id": candidate_id,
+                                "symbol": symbol,
+                                "timeframe": timeframe,
+                                "bar_time": bar_time,
                                 "direction": direction,
                                 "entry_hint": entry,
                                 "stop_hint": sl,
@@ -1213,6 +1443,7 @@ def main() -> int:
                                 "trend_alignment": float(metadata.get("trend_alignment", 0.0) or 0.0),
                                 "regime_fit": float(metadata.get("regime_fit", 0.0) or 0.0),
                                 "exhaustion_risk": float(metadata.get("exhaustion_risk", 0.0) or 0.0),
+                                "features": metadata.get("features", {}) or {},
                             }
                             ai_decision = parser.parse(
                                 groq_response=groq_response,
@@ -1226,6 +1457,20 @@ def main() -> int:
                                 f"valid={ai_decision.valid_response} latency={ai_decision.latency_ms} "
                                 f"reason={ai_decision.reason}"
                             )
+
+                            # Alert for AI decision
+                            if ai_decision.approved and ai_decision.valid_response:
+                                alert_system.ai_approved(
+                                    symbol=symbol,
+                                    direction=ai_decision.decision,
+                                    confidence=ai_decision.confidence
+                                )
+                            elif not ai_decision.approved:
+                                alert_system.ai_rejected(
+                                    symbol=symbol,
+                                    direction=ai_decision.decision,
+                                    reason=ai_decision.reason
+                                )
 
                             if ai_decision.confidence == 0.0 or ai_decision.valid_response is False:
                                 raw_content = str(groq_response.get("content", "") or "").strip()
@@ -1270,7 +1515,55 @@ def main() -> int:
                                 "response_length": len(str(groq_response.get("content", "") or "")),
                                 "dry_run": runtime.app_settings.dry_run,
                                 "latency_ms": ai_decision.latency_ms,
+                                "execution_enabled": enable_entry_execution,
+                                "execution_attempted": False,
+                                "execution_success": False,
+                                "execution_reason": "",
+                                "execution_ticket": None,
                             }
+
+                            trade_side = _normalize_trade_side(logged_decision)
+                            if enable_entry_execution and ai_decision.approved and ai_decision.valid_response:
+                                if trade_side in ("BUY", "SELL"):
+                                    decision_payload["execution_attempted"] = True
+                                    try:
+                                        ok, exec_reason, exec_ticket = _execute_entry_order(
+                                            symbol_name=symbol,
+                                            side=trade_side,
+                                            setup_id=setup_id,
+                                            sl=sl,
+                                            tp=tp,
+                                        )
+                                    except Exception as exec_exc:
+                                        ok = False
+                                        exec_reason = str(exec_exc)
+                                        exec_ticket = None
+                                    decision_payload["execution_success"] = bool(ok)
+                                    decision_payload["execution_reason"] = exec_reason
+                                    decision_payload["execution_ticket"] = exec_ticket
+                                    status_text = "SUCCESS" if ok else "FAIL"
+                                    print(
+                                        f"[EXEC] {symbol} side={trade_side} setup={setup_id} "
+                                        f"status={status_text} reason={exec_reason}"
+                                    )
+                                    
+                                    # Alert for order execution
+                                    if ok:
+                                        alert_system.order_executed(
+                                            symbol=symbol,
+                                            direction=trade_side,
+                                            ticket=exec_ticket,
+                                            status="SUCCESS"
+                                        )
+                                    else:
+                                        alert_system.order_executed(
+                                            symbol=symbol,
+                                            direction=trade_side,
+                                            ticket=exec_ticket,
+                                            status="FAILED: " + exec_reason
+                                        )
+                                else:
+                                    decision_payload["execution_reason"] = "unsupported_decision_for_execution"
 
                             with ai_log_path.open("a", encoding="utf-8") as file:
                                 file.write(json.dumps(decision_payload, ensure_ascii=False) + "\n")

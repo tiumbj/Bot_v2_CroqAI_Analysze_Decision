@@ -1,24 +1,24 @@
 # ============================================================
 # ชื่อโค้ด: Dashboard State Writer
-# ที่อยู่ไฟล์: dashboard_state_writer.py
+# ที่อยู่ไฟล์: app/dashboard_state_writer.py
 # คำสั่งรัน: ถูกเรียกจาก python app/main.py
-# เวอร์ชัน: v1.2.0
+# เวอร์ชัน: v1.2.1
 # ============================================================
 
 """
 dashboard_state_writer.py
-Version: v1.2.0
+Version: v1.2.1
 
 Purpose:
     Production dashboard state writer for runtime/dashboard_state.json
 
-CHANGELOG (v1.2.0)
+CHANGELOG (v1.2.1)
 ------------------------------------------------------------
 - KEEP: atomic JSON write via temp file + os.replace
 - KEEP: no demo fallback / no sample loop / no fake data
-- ADD: strict section field filtering for stable schema reuse
-- ADD: production-safe methods for runtime, market, indicators,
-       signal, guard, report, position, logs
+- KEEP: strict section field filtering for stable schema reuse
+- ADD: retry on Windows file-lock / transient replace failures
+- ADD: no-crash writer behavior so dashboard output layer never kills runtime
 - KEEP: monitoring/output layer only; no trading logic
 """
 
@@ -28,13 +28,17 @@ import json
 import os
 import tempfile
 import threading
+import time
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, MutableMapping
 
-WRITER_VERSION = "v1.2.0"
+WRITER_VERSION = "v1.2.1"
 SCHEMA_VERSION = "dashboard_state.schema.v1"
+
+WRITE_RETRY_ATTEMPTS = 8
+WRITE_RETRY_DELAY_SECONDS = 0.15
 
 SECTION_FIELDS: dict[str, set[str]] = {
     "runtime": {
@@ -252,24 +256,48 @@ class DashboardStateWriter:
         self._ensure_parent_dir()
         payload = deepcopy(self._state)
         payload["meta"]["updated_at"] = _utc_now_iso()
+        tmp_name: str | None = None
 
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=str(self.state_path.parent),
-            prefix=".dashboard_state.",
-            suffix=".tmp",
-            delete=False,
-        ) as tmp_file:
-            json.dump(payload, tmp_file, ensure_ascii=False, indent=2)
-            tmp_file.flush()
-            os.fsync(tmp_file.fileno())
-            tmp_name = tmp_file.name
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=str(self.state_path.parent),
+                prefix=".dashboard_state.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp_file:
+                json.dump(payload, tmp_file, ensure_ascii=False, indent=2)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+                tmp_name = tmp_file.name
 
-        os.replace(tmp_name, self.state_path)
+            last_error: Exception | None = None
+            for attempt in range(1, WRITE_RETRY_ATTEMPTS + 1):
+                try:
+                    os.replace(tmp_name, self.state_path)
+                    tmp_name = None
+                    return
+                except (PermissionError, OSError) as exc:
+                    last_error = exc
+                    if attempt >= WRITE_RETRY_ATTEMPTS:
+                        break
+                    time.sleep(WRITE_RETRY_DELAY_SECONDS)
+
+            if last_error is not None:
+                raise last_error
+        finally:
+            if tmp_name:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
 
     def _write_locked(self) -> None:
-        self._atomic_write()
+        try:
+            self._atomic_write()
+        except Exception as exc:
+            print(f"[DASHBOARD-WRITER] write skipped: {exc}")
 
     def bootstrap(
         self,

@@ -1,0 +1,28 @@
+เปิดระบบหลัก
+
+cd C:\Data\Bot\Bot_v2_GroqAI_Analysze_Decision
+$env:RUN_PRODUCTION_RUNTIME="1"
+python app/main.py
+
+
+เปิด dashboard เปิดอีกหน้าต่างแล้วรัน
+
+cd C:\Data\Bot\Bot_v2_GroqAI_Analysze_Decision
+python app/terminal_dashboard.py
+
+
+
+รีเซ็ตแล้วรันใหม่   power shell administrator 
+
+cd C:\Data\Bot\Bot_v2_GroqAI_Analysze_Decision
+Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force
+Remove-Item .\runtime\dashboard_state.json -ErrorAction SilentlyContinue
+Remove-Item .\storage\processed_setups.json -ErrorAction SilentlyContinue
+$env:RUN_PRODUCTION_RUNTIME="1"
+python app/main.py
+
+
+เปิด dashboard หลัง reset
+
+cd C:\Data\Bot\Bot_v2_GroqAI_Analysze_Decision
+python app/terminal_dashboard.py

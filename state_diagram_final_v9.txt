@@ -1,0 +1,370 @@
+[START]
+   |
+   v
+[LOAD RUNTIME CONFIG]
+   |
+   v
+[INITIALIZE FOUNDATION]
+   |
+   +-----------------------------+
+   |                             |
+   v                             v
+[RUN_PRODUCTION_RUNTIME=1 ?]   [RUN_POSITION_MONITOR=1 ?]
+   |                             |
+   | yes                         | yes
+   v                             v
+[PRODUCTION RUNTIME MODE]      [POSITION MONITOR MODE]
+   |                             |
+   v                             v
+[BOOTSTRAP DASHBOARD STATE]    [BOOTSTRAP DASHBOARD STATE]
+   |                             |
+   v                             v
+[MAIN LOOP]                    [MONITOR LOOP]
+   |                             |
+   +-------------+---------------+
+                 |
+                 v
+      [WRITE DASHBOARD STATE JSON]
+                 |
+                 v
+              [INTERRUPT]
+                 |
+                 v
+               [STOP]
+               [PRODUCTION RUNTIME MODE]
+   |
+   v
+[LOAD DEDUP STATE]
+   |
+   v
+[RESOLVE ACTIVE SYMBOLS]
+   |
+   v
+[FOR EACH SYMBOL]
+   |
+   +--> [SYMBOL NOT ACTIVE]
+   |         |
+   |         v
+   |   [SKIP SYMBOL]
+   |
+   +--> [LOAD MARKET FRAME]
+   |         |
+   |         +--> fail --> [LOG ERROR] --> [NEXT SYMBOL]
+   |         |
+   |         v
+   |   [GET TICK / QUOTE]
+   |         |
+   |         v
+   |   [UPDATE DASHBOARD: market]
+   |         |
+   |         v
+   |   [BUILD FEATURE SNAPSHOT]
+   |         |
+   |         +--> fail --> [LOG ERROR] --> [NEXT SYMBOL]
+   |         |
+   |         v
+   |   [UPDATE DASHBOARD: indicators]
+   |         |
+   |         v
+   |   [DETECT CANDIDATE]
+   |         |
+   |         +--> no candidate
+   |         |       |
+   |         |       v
+   |         | [UPDATE DASHBOARD: signal=no_candidate]
+   |         |       |
+   |         |       v
+   |         |   [NEXT SYMBOL]
+   |         |
+   |         v
+   |   [UPDATE DASHBOARD: signal=candidate]
+   |         |
+   |         v
+   |   [CHECK DEDUP]
+   |         |
+   |         +--> duplicate
+   |         |       |
+   |         |       v
+   |         | [UPDATE DASHBOARD: guard=blocked]
+   |         | [APPEND LOG: duplicate_setup_blocked]
+   |         | [UPDATE REPORT SUMMARY]
+   |         |       |
+   |         |       v
+   |         |   [NEXT SYMBOL]
+   |         |
+   |         v
+   |   [FINALIZE CANDIDATE SCAN]
+   |         |
+   |         +--> rejected by rule/guard
+   |         |       |
+   |         |       v
+   |         | [UPDATE DASHBOARD: signal/guard/report]
+   |         |       |
+   |         |       v
+   |         |   [NEXT SYMBOL]
+   |         |
+   |         v
+   |   [AI CONFIRM / META DECISION]
+   |         |
+   |         +--> rejected
+   |         |       |
+   |         |       v
+   |         | [UPDATE DASHBOARD: guard/report/log]
+   |         |       |
+   |         |       v
+   |         |   [NEXT SYMBOL]
+   |         |
+   |         v
+   |   [APPROVED SIGNAL]
+   |         |
+   |         v
+   |   [UPDATE DASHBOARD: signal approved]
+   |   [UPDATE DASHBOARD: report summary]
+   |
+   v
+[END CYCLE]
+   |
+   v
+[PRINT SUMMARY / CYCLE RESULT]
+   |
+   v
+[LOOP OR INTERRUPT]
+[POSITION MONITOR MODE]
+   |
+   v
+[LOAD OPEN POSITIONS]
+   |
+   +--> [NO POSITION]
+   |         |
+   |         v
+   |   [REPORT positions=0]
+   |   [UPDATE DASHBOARD: report]
+   |         |
+   |         v
+   |      [NEXT CYCLE]
+   |
+   v
+[FOR EACH POSITION]
+   |
+   v
+[CHECK SYMBOL AVAILABLE]
+   |
+   +--> unavailable
+   |      |
+   |      v
+   | [MONITOR HOLD: symbol_unavailable]
+   | [UPDATE DASHBOARD: report/log]
+   |      |
+   |      v
+   |   [NEXT POSITION]
+   |
+   v
+[LOAD LATEST MARKET FRAME]
+   |
+   v
+[GET CURRENT PRICE / TICK]
+   |
+   v
+[BUILD FEATURE SNAPSHOT]
+   |
+   v
+[UPDATE DASHBOARD: market]
+   |
+   v
+[UPDATE DASHBOARD: indicators]
+   |
+   v
+[EVALUATE EXIT DECISION]
+   |
+   +--> HOLD
+   |      |
+   |      v
+   | [WRITE MONITOR LOG]
+   | [UPDATE DASHBOARD: log]
+   | [UPDATE DASHBOARD: position]
+   |      |
+   |      v
+   |   [NEXT POSITION]
+   |
+   +--> FORCE_EXIT / EXIT
+          |
+          v
+   [BUILD CLOSE REQUEST]
+          |
+          +--> dry_run=true
+          |      |
+          |      v
+          | [MARK close_result=skipped]
+          | [WRITE MONITOR LOG]
+          | [UPDATE DASHBOARD: position/report/log]
+          |      |
+          |      v
+          |   [NEXT POSITION]
+          |
+          +--> live close enabled
+                 |
+                 v
+          [SEND CLOSE ORDER]
+                 |
+                 +--> fail --> [LOG CLOSE ERROR] --> [UPDATE DASHBOARD]
+                 |
+                 +--> success --> [LOG CLOSE SUCCESS] --> [UPDATE DASHBOARD]
+                 [DASHBOARD WRITER CREATED]
+   |
+   v
+[BOOTSTRAP STATE]
+   |
+   v
+[WAIT FOR RUNTIME PAYLOAD]
+   |
+   +--> runtime payload ------> [UPDATE runtime]
+   |
+   +--> market payload -------> [UPDATE market]
+   |
+   +--> indicator payload ----> [UPDATE indicators]
+   |
+   +--> signal payload -------> [UPDATE signal]
+   |
+   +--> guard payload --------> [UPDATE guard]
+   |
+   +--> report payload -------> [UPDATE report]
+   |
+   +--> position payload -----> [UPDATE position]
+   |
+   +--> log payload ----------> [APPEND logs]
+   |
+   v
+[ATOMIC WRITE TEMP FILE]
+   |
+   v
+[REPLACE dashboard_state.json]
+   |
+   +--> fail --> [PRINT WRITER ERROR, DO NOT BREAK RUNTIME]
+   |
+   +--> success --> [STATE UPDATED]
+   [MarketDataService / Gateway / FeatureEngine / CandidateEngine / Guard / Monitor]
+                                 |
+                                 v
+                    [app/main.py runtime hooks]
+                                 |
+                                 v
+                    [DashboardStateWriter v1.2.0]
+                                 |
+                                 v
+                 runtime/dashboard_state.json
+                                 |
+                                 v
+                      [terminal_dashboard.py]
+
+
+                      Source:
+- build_runtime_context()
+- app settings
+- active symbol from runtime loop / monitor loop
+
+
+Source:
+- market_data.load_symbol_frame(symbol)
+- gateway.get_tick(symbol)
+- latest bar OHLC
+
+Source:
+- feature_engine.build_snapshot(...)
+- EMA / RSI / MACD / ADX / ATR / BB / DI
+
+
+Source:
+- candidate_engine.detect_candidate(...)
+- finalize_candidate_scan(...)
+
+
+Source:
+- dedup block
+- rule reject
+- AI reject
+- execution safety decision
+
+
+Source:
+- cycle summary
+- monitor cycle summary
+- last event/log payload
+
+[Trading Logic]
+   |
+   +--> market loading
+   +--> feature calculation
+   +--> candidate detection
+   +--> guard / dedup / AI
+   +--> monitor / close logic
+   |
+   v
+[Dashboard Layer]
+   |
+   +--> read-only observer of runtime decisions
+   +--> no trading decision authority
+   +--> no demo fallback
+   +--> no fake data generation
+   +--> no sample loop
+
+
+START
+ -> bootstrap
+ -> market loaded
+ -> indicators built
+ -> candidate found / not found
+ -> guard blocked / approved
+ -> report summary updated
+ -> dashboard json updated
+ -> next cycle
+
+
+ START
+ -> bootstrap
+ -> position found / not found
+ -> market + indicators refreshed
+ -> exit decision evaluated
+ -> close skipped / sent
+ -> position + report + logs updated
+ -> dashboard json updated
+ -> next cycle
+
+
+ Any dashboard writer failure
+ -> print error
+ -> trading runtime continues
+
+
+ [CONFIG + FOUNDATION]
+        |
+        v
+[MAIN ENTRY: app/main.py]
+        |
+        +--> [PRODUCTION RUNTIME]
+        |        |
+        |        +--> market
+        |        +--> indicators
+        |        +--> candidate
+        |        +--> guard/dedup/AI
+        |        +--> report
+        |        +--> dashboard write
+        |
+        +--> [POSITION MONITOR]
+                 |
+                 +--> open positions
+                 +--> market refresh
+                 +--> indicators
+                 +--> exit decision
+                 +--> close request/result
+                 +--> position/log/report
+                 +--> dashboard write
+
+dashboard_state.json = latest state of whichever mode ran last
+
+
+
+
+
+
+
+

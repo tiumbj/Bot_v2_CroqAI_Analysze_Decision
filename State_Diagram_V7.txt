@@ -1,0 +1,47 @@
+[*] -> Startup
+Startup -> LoadConfig
+LoadConfig -> InitServices : config ok
+LoadConfig -> FatalError : config invalid
+
+InitServices -> ResolveSymbols
+ResolveSymbols -> WaitCycle : ready
+ResolveSymbols -> FatalError : mismatch
+
+WaitCycle -> FetchMarketData
+FetchMarketData -> AnalyzeSetup : data ok
+FetchMarketData -> WaitCycle : data fail
+
+AnalyzeSetup -> NoCandidate
+AnalyzeSetup -> CandidateFound
+NoCandidate -> WaitCycle
+
+CandidateFound -> CheckDedup
+CheckDedup -> WaitCycle : duplicate
+CheckDedup -> CheckSpread : new setup
+CheckSpread -> WaitCycle : spread fail
+CheckSpread -> CheckRisk : pass
+CheckRisk -> WaitCycle : risk fail
+CheckRisk -> AIConfirm : pass
+
+AIConfirm -> WaitCycle : reject/error
+AIConfirm -> BuildOrderPlan : approve
+
+BuildOrderPlan -> SubmitOrder
+SubmitOrder -> PositionMonitoring : open success
+SubmitOrder -> WaitCycle : open fail
+
+PositionMonitoring -> PositionMonitoring : hold
+PositionMonitoring -> ClosePosition : TP
+PositionMonitoring -> ClosePosition : SL
+PositionMonitoring -> ClosePosition : trailing stop
+PositionMonitoring -> ClosePosition : early protect
+PositionMonitoring -> ClosePosition : force reversal
+PositionMonitoring -> ClosePosition : manual kill
+
+ClosePosition -> LogResult : close live
+ClosePosition -> LogResult : close simulated
+ClosePosition -> LogResult : close failed
+ClosePosition -> LogResult : close skipped
+
+LogResult -> WaitCycle
+FatalError -> [*]

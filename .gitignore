@@ -9,3 +9,6 @@ storage/bot.db
 storage/logs/
 
 *.bak
+storage/*.jsonl
+storage/*.json
+runtime/

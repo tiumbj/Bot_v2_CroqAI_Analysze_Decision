@@ -1,0 +1,677 @@
+Bot_v2_Groq_AI_Analysze_Decision
+STATE_DIAGRAM
+Version: v5.0.0
+Based on confirmed repo state up to commit: ad03046
+Commit message: Implement production position monitor and early exit gate
+
+========================================================================
+1) SYSTEM STATE OVERVIEW
+========================================================================
+
+[STATE A] BOOTSTRAP
+    |
+    v
+[STATE B] PRODUCTION RUNTIME
+    |
+    +--> market data load
+    +--> feature snapshot build
+    +--> candidate detection
+    +--> candidate finalization
+    +--> Groq decision
+    +--> AI logging
+    |
+    v
+[STATE C] POSITION MONITOR
+    |
+    +--> read open positions
+    +--> evaluate early exit
+    +--> HOLD / CLOSE_EARLY / FORCE_EXIT
+    +--> optional close execution gate
+    |
+    v
+[STATE D] SHUTDOWN / CONTINUE LOOP
+
+========================================================================
+2) MAIN ENTRY STATE FLOW
+========================================================================
+
+STATE: APP_START
+  Action:
+  - enter app/main.py
+
+  Transition:
+  -> LOAD_CONFIG
+
+STATE: LOAD_CONFIG
+  Action:
+  - load YAML config
+  - validate runtime settings
+
+  Success:
+  -> INIT_STORAGE
+
+  Failure:
+  -> STARTUP_FAIL
+
+STATE: INIT_STORAGE
+  Action:
+  - initialize storage paths / db
+
+  Transition:
+  -> PRINT_RUNTIME_SUMMARY
+
+STATE: PRINT_RUNTIME_SUMMARY
+  Action:
+  - print app_name
+  - print environment
+  - print symbols
+  - print timeframe
+  - print ai_model
+  - print risk settings
+
+  Transition:
+  -> SELECT_RUNTIME_MODE
+
+STATE: SELECT_RUNTIME_MODE
+  Mode priority:
+  1. RUN_POSITION_MONITOR=1
+  2. RUN_PRODUCTION_RUNTIME=1
+     OR legacy alias RUN_DEMO_RUNTIME=1
+  3. RUN_CANDIDATE_TO_GROQ_SMOKE=1
+  4. default bootstrap-only path
+
+  Transitions:
+  - RUN_POSITION_MONITOR=1        -> POSITION_MONITOR_RUNTIME
+  - RUN_PRODUCTION_RUNTIME=1      -> PRODUCTION_RUNTIME_LOOP
+  - RUN_DEMO_RUNTIME=1            -> PRODUCTION_RUNTIME_LOOP (legacy alias)
+  - RUN_CANDIDATE_TO_GROQ_SMOKE=1 -> CANDIDATE_TO_GROQ_SMOKE
+  - none set                      -> FOUNDATION_COMPLETE
+
+========================================================================
+3) DEFAULT BOOTSTRAP PATH
+========================================================================
+
+STATE: FOUNDATION_COMPLETE
+  Action:
+  - print "Foundation layer initialized successfully."
+
+  End state:
+  - normal startup complete
+  - no runtime loop
+  - no monitor loop
+
+========================================================================
+4) PRODUCTION RUNTIME LOOP
+========================================================================
+
+STATE: PRODUCTION_RUNTIME_INIT
+  Action:
+  - read runtime interval env
+  - read max cycles env
+  - read active symbols from configured symbol list
+  - filter unavailable MT5 symbols
+  - print active symbols
+  - initialize reusable objects:
+    - MT5Gateway
+    - MarketDataService
+    - FeatureEngine
+    - CandidateEngine
+  - initialize duplicate setup memory
+  - initialize AI JSONL logging path
+  - warn once if GROQ_API_KEY missing
+
+  Transition:
+  -> PRODUCTION_RUNTIME_CYCLE_START
+
+STATE: PRODUCTION_RUNTIME_CYCLE_START
+  Action:
+  - increment cycle number
+  - initialize raw_candidates = []
+
+  Transition:
+  -> LOAD_SYMBOL_FRAMES
+
+STATE: LOAD_SYMBOL_FRAMES
+  For each active symbol:
+  Action:
+  - load market frame from MT5
+  - on failure:
+      print concise skip line
+      continue
+
+  Success:
+  -> BUILD_FEATURE_SNAPSHOT
+
+STATE: BUILD_FEATURE_SNAPSHOT
+  Action:
+  - use FeatureEngine.build_snapshot(...)
+
+  Success:
+  -> DETECT_CANDIDATE
+
+STATE: DETECT_CANDIDATE
+  Action:
+  - use CandidateEngine.detect_candidate(snapshot)
+
+  If no candidate:
+  -> NEXT_SYMBOL
+
+  If candidate found:
+  -> APPEND_RAW_CANDIDATE
+
+STATE: APPEND_RAW_CANDIDATE
+  Action:
+  - convert CandidateSignal to plain dict row
+  - append to raw_candidates
+
+  Transition:
+  -> NEXT_SYMBOL
+
+STATE: NEXT_SYMBOL
+  Condition:
+  - more active symbols?
+
+  If YES:
+  -> LOAD_SYMBOL_FRAMES
+
+  If NO:
+  -> FINALIZE_CANDIDATES
+
+STATE: FINALIZE_CANDIDATES
+  Action:
+  - call finalize_candidate_scan(
+      raw_candidates=raw_candidates,
+      timeframe=runtime.app_settings.timeframe,
+      processed_symbols=len(active_symbols)
+    )
+  - receive:
+    - accepted
+    - rejected
+    - all_items
+    - log_lines
+    - summary
+  - print finalized log_lines
+
+  Transition:
+  -> PROCESS_ACCEPTED_CANDIDATES
+
+STATE: PROCESS_ACCEPTED_CANDIDATES
+  Action:
+  - iterate accepted candidates only
+
+  If none:
+  -> PRODUCTION_RUNTIME_CYCLE_SUMMARY
+
+  If accepted exists:
+  -> CHECK_DUPLICATE_SETUP
+
+STATE: CHECK_DUPLICATE_SETUP
+  Action:
+  - derive setup_id priority:
+    1. candidate.setup_key
+    2. metadata.candidate_id
+    3. deterministic fallback:
+       symbol|timeframe|bar_time|direction
+  - check in-memory processed setup memory
+
+  If duplicate:
+  - print [SKIP-DUPLICATE]
+  -> NEXT_ACCEPTED_CANDIDATE
+
+  If new:
+  -> BUILD_GROQ_PROMPT
+
+STATE: BUILD_GROQ_PROMPT
+  Action:
+  - map accepted candidate fields into GroqPromptBuilder input:
+    - symbol
+    - timeframe
+    - direction
+    - score
+    - entry_hint
+    - stop_hint
+    - target_hint
+    - reasons
+    - features
+    - bar_time
+  - call GroqPromptBuilder.build_decision_prompt(...)
+
+  Transition:
+  -> CALL_GROQ
+
+STATE: CALL_GROQ
+  Action:
+  - call GroqClient.chat_completion(system_prompt=..., user_prompt=...)
+
+  If GROQ_API_KEY missing:
+  - fail closed path
+
+  If API failure:
+  - fail closed path
+
+  If API success:
+  - return content, model_name, latency_ms
+
+  Transition:
+  -> PARSE_GROQ_RESPONSE
+
+STATE: PARSE_GROQ_RESPONSE
+  Action:
+  - build parser candidate_data
+  - call GroqResponseParser.parse(...)
+  - obtain AIDecision
+
+  Parser guarantees:
+  - schema-valid AIDecision
+  - fail closed on malformed output
+  - low confidence -> approved=False
+  - invalid stop placement -> valid_response=False
+
+  Transition:
+  -> LOG_AI_DECISION
+
+STATE: LOG_AI_DECISION
+  Action:
+  - print one concise [AI] summary line
+  - if confidence == 0.0 or valid_response == False:
+      print [AI-DEBUG]
+  - append JSONL line under storage/
+    minimum fields:
+    - timestamp
+    - symbol
+    - candidate_id
+    - decision
+    - approved
+    - confidence
+    - valid_response
+    - reason
+    - model_name
+    - latency_ms
+  - store setup_id in processed setup memory
+
+  Transition:
+  -> NEXT_ACCEPTED_CANDIDATE
+
+STATE: NEXT_ACCEPTED_CANDIDATE
+  Condition:
+  - more accepted candidates?
+
+  If YES:
+  -> CHECK_DUPLICATE_SETUP
+
+  If NO:
+  -> PRODUCTION_RUNTIME_CYCLE_SUMMARY
+
+STATE: PRODUCTION_RUNTIME_CYCLE_SUMMARY
+  Action:
+  - print:
+    [CYCLE] <n> raw=<...> accepted=<...> rejected=<...> ai=<...>
+
+  Transition:
+  -> CHECK_PRODUCTION_RUNTIME_STOP
+
+STATE: CHECK_PRODUCTION_RUNTIME_STOP
+  Conditions:
+  - max cycles reached?
+  - KeyboardInterrupt?
+
+  If max cycles reached:
+  -> FOUNDATION_COMPLETE
+
+  If KeyboardInterrupt:
+  -> PRODUCTION_RUNTIME_SHUTDOWN
+
+  Else:
+  -> PRODUCTION_RUNTIME_SLEEP
+
+STATE: PRODUCTION_RUNTIME_SLEEP
+  Action:
+  - sleep(PRODUCTION_RUNTIME_INTERVAL_SECONDS
+          or DEMO_RUNTIME_INTERVAL_SECONDS legacy alias)
+
+  Transition:
+  -> PRODUCTION_RUNTIME_CYCLE_START
+
+STATE: PRODUCTION_RUNTIME_SHUTDOWN
+  Action:
+  - print concise shutdown line
+  - shutdown MT5 cleanly if needed
+
+  Transition:
+  -> FOUNDATION_COMPLETE
+
+========================================================================
+5) POSITION MONITOR RUNTIME
+========================================================================
+
+STATE: POSITION_MONITOR_INIT
+  Action:
+  - read POSITION_MONITOR_INTERVAL_SECONDS
+  - read POSITION_MONITOR_MAX_CYCLES
+  - read ENABLE_POSITION_CLOSE_EXECUTION
+  - read POSITION_MONITOR_MIN_PROFIT_POINTS
+  - initialize MT5Gateway
+  - initialize MarketDataService
+  - initialize FeatureEngine
+  - filter active symbols once
+  - initialize in-memory closed-ticket protection
+  - initialize JSONL log file for monitor decisions
+
+  Transition:
+  -> POSITION_MONITOR_CYCLE_START
+
+STATE: POSITION_MONITOR_CYCLE_START
+  Action:
+  - increment monitor cycle number
+  - positions_count = 0
+  - close_signals = 0
+  - executed = 0
+
+  Transition:
+  -> READ_OPEN_POSITIONS
+
+STATE: READ_OPEN_POSITIONS
+  For each active symbol:
+  Action:
+  - query open positions from MT5 for symbol
+
+  If no positions:
+  - continue
+
+  If positions found:
+  -> PROCESS_POSITION
+
+STATE: PROCESS_POSITION
+  Action:
+  - determine:
+    - ticket
+    - symbol
+    - side BUY / SELL
+    - volume
+    - price_open
+    - sl
+    - tp
+  - positions_count += 1
+
+  Transition:
+  -> LOAD_MONITOR_MARKET_FRAME
+
+STATE: LOAD_MONITOR_MARKET_FRAME
+  Action:
+  - load fresh market frame for symbol
+
+  If failure:
+  - print concise monitor skip line
+  -> NEXT_POSITION
+
+  If success:
+  -> BUILD_MONITOR_FEATURE_SNAPSHOT
+
+STATE: BUILD_MONITOR_FEATURE_SNAPSHOT
+  Action:
+  - build feature snapshot from fresh market frame
+
+  Transition:
+  -> EVALUATE_EARLY_EXIT_RULES
+
+STATE: EVALUATE_EARLY_EXIT_RULES
+  Action:
+  - compute floating profit points
+  - inspect deterministic reversal evidence from existing snapshot fields only
+  - decide one of:
+    - HOLD
+    - CLOSE_EARLY
+    - FORCE_EXIT
+  - build short reason string
+
+  Decision rules:
+  For BUY:
+    - CLOSE_EARLY:
+        profit >= threshold
+        AND bearish reversal evidence appears
+    - FORCE_EXIT:
+        strong adverse reversal evidence
+  For SELL:
+    - CLOSE_EARLY:
+        profit >= threshold
+        AND bullish reversal evidence appears
+    - FORCE_EXIT:
+        strong adverse reversal evidence
+
+  Transition:
+  -> PRINT_MONITOR_LINE
+
+STATE: PRINT_MONITOR_LINE
+  Action:
+  - print:
+    [MONITOR] <symbol> side=<BUY|SELL> action=<...> ticket=<...> reason=<...>
+
+  If action in {CLOSE_EARLY, FORCE_EXIT}:
+  - close_signals += 1
+
+  Transition:
+  -> MONITOR_EXECUTION_GATE
+
+STATE: MONITOR_EXECUTION_GATE
+  Conditions:
+  - action == HOLD ?
+  - action in {CLOSE_EARLY, FORCE_EXIT} ?
+  - ENABLE_POSITION_CLOSE_EXECUTION == "1" ?
+  - ticket already successfully closed in this runtime?
+
+  Cases:
+  1. HOLD:
+     -> LOG_MONITOR_DECISION
+
+  2. CLOSE_EARLY / FORCE_EXIT with execution disabled:
+     -> LOG_MONITOR_DECISION
+
+  3. CLOSE_EARLY / FORCE_EXIT with execution enabled and ticket not yet closed:
+     -> EXECUTE_CLOSE_BY_TICKET
+
+  4. CLOSE_EARLY / FORCE_EXIT but ticket already closed before:
+     -> LOG_MONITOR_DECISION
+
+STATE: EXECUTE_CLOSE_BY_TICKET
+  Action:
+  - use existing MT5 capabilities available in repo
+  - close position by ticket
+  - capture success/fail result
+  - if success:
+      executed += 1
+      add ticket to closed-ticket protection memory
+  - print:
+    [MONITOR-EXEC] <symbol> ticket=<ticket> action=<...> status=<SUCCESS|FAIL> reason=<...>
+
+  Transition:
+  -> LOG_MONITOR_DECISION
+
+STATE: LOG_MONITOR_DECISION
+  Action:
+  - append JSONL line under storage/
+    fields include:
+    - timestamp
+    - symbol
+    - ticket
+    - side
+    - action
+    - reason
+    - price_open
+    - current_price if available
+    - sl
+    - tp
+    - volume
+    - execution_enabled
+    - execution_attempted
+    - execution_success
+
+  Transition:
+  -> NEXT_POSITION
+
+STATE: NEXT_POSITION
+  Condition:
+  - more positions / more symbols?
+
+  If YES:
+  -> READ_OPEN_POSITIONS
+
+  If NO:
+  -> POSITION_MONITOR_CYCLE_SUMMARY
+
+STATE: POSITION_MONITOR_CYCLE_SUMMARY
+  Action:
+  - print:
+    [MONITOR-CYCLE] <cycle> positions=<count> close_signals=<count> executed=<count>
+
+  Transition:
+  -> CHECK_POSITION_MONITOR_STOP
+
+STATE: CHECK_POSITION_MONITOR_STOP
+  Conditions:
+  - max cycles reached?
+  - KeyboardInterrupt?
+
+  If max cycles reached:
+  -> FOUNDATION_COMPLETE
+
+  If KeyboardInterrupt:
+  -> POSITION_MONITOR_SHUTDOWN
+
+  Else:
+  -> POSITION_MONITOR_SLEEP
+
+STATE: POSITION_MONITOR_SLEEP
+  Action:
+  - sleep(POSITION_MONITOR_INTERVAL_SECONDS)
+
+  Transition:
+  -> POSITION_MONITOR_CYCLE_START
+
+STATE: POSITION_MONITOR_SHUTDOWN
+  Action:
+  - print concise shutdown line
+  - shutdown MT5 cleanly if needed
+
+  Transition:
+  -> FOUNDATION_COMPLETE
+
+========================================================================
+6) CANDIDATE TO GROQ SMOKE PATH
+========================================================================
+
+STATE: CANDIDATE_TO_GROQ_SMOKE
+  Action:
+  - call app/smoke_test_candidate_to_groq.py style integration path
+  - use finalized sample/integration flow
+  - build prompt
+  - call Groq
+  - parse AIDecision
+
+  Transition:
+  -> FOUNDATION_COMPLETE
+
+========================================================================
+7) FAIL-CLOSED AI STATE MODEL
+========================================================================
+
+STATE: AI_RESPONSE_VALID
+  Condition:
+  - model response parseable
+  - required fields present
+  - stop-loss logic valid
+  - confidence >= threshold
+
+  Result:
+  - approved may be True
+  - valid_response=True
+
+STATE: AI_RESPONSE_LOW_CONFIDENCE
+  Condition:
+  - confidence < minimum_confidence
+
+  Result:
+  - approved=False
+  - valid_response=True
+
+STATE: AI_RESPONSE_INVALID
+  Conditions include:
+  - malformed JSON
+  - missing required fields
+  - invalid stop-loss placement
+  - invalid decision shape
+
+  Result:
+  - approved=False
+  - valid_response=False
+
+========================================================================
+8) CURRENT PRODUCTION TRUTH
+========================================================================
+
+DONE
+- bootstrap path
+- production runtime loop
+- active symbol filtering
+- MT5 market data integration
+- feature snapshot generation
+- candidate detection
+- candidate finalization
+- Groq prompt/client/parser
+- AIDecision logging
+- duplicate setup protection
+- position monitor gate
+- early exit gate
+- close execution gate
+
+NOT YET CLAIMED AS FULLY COMPLETE
+- full execution orchestration tied to entry lifecycle persistence
+- advanced partial close / breakeven / trailing logic
+- recovery from restart with persistent duplicate memory
+- full broker-agnostic symbol abstraction for every runtime path
+- long-run observability / alerting stack
+
+========================================================================
+9) ASCII STATE MAP
+========================================================================
+
+                    ┌─────────────────────┐
+                    │      APP_START      │
+                    └──────────┬──────────┘
+                               v
+                    ┌─────────────────────┐
+                    │   LOAD_CONFIG       │
+                    └──────────┬──────────┘
+                               v
+                    ┌─────────────────────┐
+                    │   INIT_STORAGE      │
+                    └──────────┬──────────┘
+                               v
+                    ┌─────────────────────┐
+                    │ PRINT_RUNTIME_SUMMARY│
+                    └──────────┬──────────┘
+                               v
+                    ┌─────────────────────┐
+                    │  SELECT_RUNTIME_MODE│
+                    └───────┬──────┬──────┘
+                            │      │
+                            │      └──────────────┐
+                            │                     │
+                            v                     v
+              ┌──────────────────────┐   ┌─────────────────────────┐
+              │ POSITION_MONITOR_LOOP│   │ PRODUCTION_RUNTIME_LOOP │
+              └──────────┬───────────┘   └──────────┬──────────────┘
+                         │                          │
+                         v                          v
+              ┌──────────────────────┐   ┌─────────────────────────┐
+              │ HOLD/CLOSE/FORCE_EXIT│   │ FINALIZE + GROQ + AI    │
+              └──────────┬───────────┘   └──────────┬──────────────┘
+                         │                          │
+                         └──────────────┬───────────┘
+                                        v
+                             ┌─────────────────────┐
+                             │ FOUNDATION_COMPLETE │
+                             └─────────────────────┘
+
+========================================================================
+10) END OF FILE
+========================================================================
